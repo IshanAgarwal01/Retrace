@@ -1,22 +1,54 @@
+import asyncio
 import logging
 import os
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from capture import parse_capture
+from capture import parse_capture, summarize
 from db import connect, init_db
 from sync import sync_assignments
 
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("retrace")
 
+SYNC_EVERY = timedelta(hours=1)
+
+# The exported web app (npx expo export --platform web). The Dockerfile puts it at
+# /app/web; locally it's mobile/dist after you run the export yourself.
+WEB_DIR = Path(os.environ.get("RETRACE_WEB_DIR", Path(__file__).resolve().parent.parent / "mobile" / "dist"))
+
+
+async def sync_forever() -> None:
+    while True:
+        try:
+            # sync_assignments is ordinary blocking code, so run it on a worker thread
+            # instead of freezing the server while Carmen downloads
+            result = await asyncio.to_thread(sync_assignments)
+            log.info("Carmen sync: %s added, %s changes", result["added"], len(result["changes"]))
+        except Exception:
+            log.exception("Scheduled Carmen sync failed")
+        await asyncio.sleep(SYNC_EVERY.total_seconds())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Runs once when the server starts (before the yield) and once when it stops
+    task = asyncio.create_task(sync_forever())
+    yield
+    task.cancel()
+
+
 init_db()
-app = FastAPI(title="Retrace")
+app = FastAPI(title="Retrace", lifespan=lifespan)
 
 # Lets the Expo web preview (http://localhost:8081) call this server from a browser.
 # The phone app is not a browser, so it doesn't need this.
@@ -135,7 +167,7 @@ def create_capture(capture: CaptureIn):
                 saved.append({"id": cursor.lastrowid, **item, "status": "open"})
     finally:
         conn.close()
-    return {"ai_ok": ai_output is not None, "items": saved}
+    return {"ai_ok": ai_output is not None, "summary": summarize(parsed), "items": saved}
 
 
 @api.get("/items")
@@ -226,3 +258,7 @@ def one_list():
 
 
 app.include_router(api)
+
+# Serve the app itself at "/". Mounted last so every API route above wins first.
+if WEB_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

@@ -1,7 +1,9 @@
+import os
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "retrace.db"
+# On the hosted server this points at a persistent disk (see Dockerfile)
+DB_PATH = Path(os.environ.get("RETRACE_DB_PATH", Path(__file__).parent / "retrace.db"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS assignments (
@@ -45,6 +47,7 @@ CREATE TABLE IF NOT EXISTS items (
 
 
 def connect() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

@@ -143,6 +143,23 @@ def test_init_db_adds_missing_columns(tmp_path, monkeypatch):
     assert "done_at" in columns
 
 
+def test_capture_returns_readable_summary(client, monkeypatch):
+    items = [
+        {"type": "task", "title": "Finish 2321 homework", "due_at": "2026-10-24T03:59:00+00:00",
+         "all_day": True, "course": "CSE 2321", "place": None},
+        {"type": "reminder", "title": "Call mom", "due_at": "2026-10-23T19:00:00+00:00",
+         "all_day": False, "course": None, "place": None},
+    ]
+    monkeypatch.setattr(main, "parse_capture", fake_parse(items))
+
+    body = client.post("/captures", json={"text": "..."}, headers=AUTH).json()
+
+    assert body["summary"] == (
+        "Task: Finish 2321 homework (CSE 2321), due Fri Oct 23\n"
+        "Reminder: Call mom, due Fri Oct 23 at 3:00 PM"
+    )
+
+
 def test_empty_capture_is_rejected(client):
     assert client.post("/captures", json={"text": ""}, headers=AUTH).status_code == 422
 

@@ -97,3 +97,23 @@ def parse_capture(text: str, course_codes: list[str]) -> tuple[list[dict], str]:
     if not items:
         raise CaptureError("Claude returned an empty list")
     return items, response.parsed_output.model_dump_json()
+
+
+TYPE_LABELS = {"task": "Task", "reminder": "Reminder", "idea": "Idea", "song": "Song",
+               "note": "Note", "question": "Question"}
+
+
+def summarize(items: list[dict]) -> str:
+    """One readable line per item, e.g. for Siri to show after a voice capture."""
+    lines = []
+    for item in items:
+        line = f"{TYPE_LABELS.get(item['type'], item['type'])}: {item['title']}"
+        if item["course"]:
+            line += f" ({item['course']})"
+        if item["due_at"]:
+            due = datetime.fromisoformat(item["due_at"]).astimezone(COLUMBUS)
+            line += f", due {due:%a %b} {due.day}"
+            if not item["all_day"]:
+                line += f" at {due.hour % 12 or 12}:{due:%M %p}"
+        lines.append(line)
+    return "\n".join(lines)

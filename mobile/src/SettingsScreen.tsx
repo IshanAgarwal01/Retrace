@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { api, errorMessage, saveSettings, type Settings } from "./api";
 import type { Theme } from "./theme";
@@ -12,7 +12,9 @@ type Props = {
 };
 
 export function SettingsScreen({ theme, initial, onSaved, onCancel }: Props) {
-  const [serverUrl, setServerUrl] = useState(initial?.serverUrl ?? "");
+  // On the web the app is served by the Retrace server itself, so its own address is the answer
+  const defaultUrl = Platform.OS === "web" ? globalThis.location?.origin ?? "" : "";
+  const [serverUrl, setServerUrl] = useState(initial?.serverUrl ?? defaultUrl);
   const [apiKey, setApiKey] = useState(initial?.apiKey ?? "");
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,8 +40,8 @@ export function SettingsScreen({ theme, initial, onSaved, onCancel }: Props) {
     <View style={styles.container}>
       <Text style={[styles.heading, { color: theme.text }]}>Connect to your server</Text>
       <Text style={[styles.help, { color: theme.muted }]}>
-        Server address is where your Retrace server runs, for example http://192.168.1.20:8000.
-        The API key is RETRACE_API_KEY from server/.env.
+        The server address is where Retrace runs; it's usually filled in for you. The API key is
+        RETRACE_API_KEY from your server settings.
       </Text>
 
       <Text style={[styles.label, { color: theme.muted }]}>Server address</Text>
