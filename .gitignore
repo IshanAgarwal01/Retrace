@@ -1,0 +1,17 @@
+# Python vitrual environment (rebuildable, huge, machine-specific)
+.venv/
+
+# Secrets: never commit these
+.env
+
+# Python's compiled bytecode cache
+__pycache__/
+*.pyc
+
+#Local database files
+*.db
+*.sqlite3
+
+# Editor / OS clutter
+.vscode/
+Thumbs.db
