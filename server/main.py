@@ -1,8 +1,6 @@
-import asyncio
 import logging
 import os
 import secrets
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -20,35 +18,14 @@ from sync import sync_assignments
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("retrace")
 
-SYNC_EVERY = timedelta(hours=1)
-
 # The exported web app (npx expo export --platform web). The Dockerfile puts it at
 # /app/web; locally it's mobile/dist after you run the export yourself.
 WEB_DIR = Path(os.environ.get("RETRACE_WEB_DIR", Path(__file__).resolve().parent.parent / "mobile" / "dist"))
 
-
-async def sync_forever() -> None:
-    while True:
-        try:
-            # sync_assignments is ordinary blocking code, so run it on a worker thread
-            # instead of freezing the server while Carmen downloads
-            result = await asyncio.to_thread(sync_assignments)
-            log.info("Carmen sync: %s added, %s changes", result["added"], len(result["changes"]))
-        except Exception:
-            log.exception("Scheduled Carmen sync failed")
-        await asyncio.sleep(SYNC_EVERY.total_seconds())
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Runs once when the server starts (before the yield) and once when it stops
-    task = asyncio.create_task(sync_forever())
-    yield
-    task.cancel()
-
-
+# No timer runs inside the server: free hosting puts idle servers to sleep, which
+# would stop it. Instead an outside scheduler (cron-job.org) calls POST /sync hourly.
 init_db()
-app = FastAPI(title="Retrace", lifespan=lifespan)
+app = FastAPI(title="Retrace")
 
 # Lets the Expo web preview (http://localhost:8081) call this server from a browser.
 # The phone app is not a browser, so it doesn't need this.
@@ -127,7 +104,9 @@ def list_changes():
 
 @api.post("/sync")
 def sync():
-    return sync_assignments()
+    result = sync_assignments()
+    log.info("Carmen sync: %s added, %s changes", result["added"], len(result["changes"]))
+    return result
 
 
 @api.post("/captures", status_code=201)
@@ -153,18 +132,19 @@ def create_capture(capture: CaptureIn):
 
         now = datetime.now(timezone.utc).isoformat()
         saved = []
-        with conn:
+        with conn.transaction():
             for item in parsed:
                 cursor = conn.execute(
                     """INSERT INTO items
                        (type, title, source, due_at, all_day, course, place,
                         raw_text, ai_output, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       RETURNING id""",
                     (item["type"], item["title"], capture.source, item["due_at"],
-                     item["all_day"], item["course"], item["place"],
+                     int(item["all_day"]), item["course"], item["place"],
                      capture.text, ai_output, now),
                 )
-                saved.append({"id": cursor.lastrowid, **item, "status": "open"})
+                saved.append({"id": cursor.fetchone()["id"], **item, "status": "open"})
     finally:
         conn.close()
     return {"ai_ok": ai_output is not None, "summary": summarize(parsed), "items": saved}
@@ -189,7 +169,7 @@ def update_item(item_id: int, update: ItemUpdate):
     done_at = datetime.now(timezone.utc).isoformat() if update.status == "done" else None
     conn = connect()
     try:
-        with conn:
+        with conn.transaction():
             cursor = conn.execute(
                 "UPDATE items SET status = ?, done_at = ? WHERE id = ?",
                 (update.status, done_at, item_id),
@@ -207,7 +187,7 @@ def update_assignment(assignment_id: int, update: AssignmentUpdate):
     done_at = datetime.now(timezone.utc).isoformat() if update.done else None
     conn = connect()
     try:
-        with conn:
+        with conn.transaction():
             cursor = conn.execute(
                 "UPDATE assignments SET done_at = ? WHERE id = ?", (done_at, assignment_id)
             )

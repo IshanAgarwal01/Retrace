@@ -16,7 +16,7 @@ def sync_assignments() -> dict:
 
     conn = connect()
     try:
-        with conn:  # one transaction: either everything saves, or nothing does
+        with conn.transaction():  # either everything saves, or nothing does
             for a in assignments:
                 row = conn.execute(
                     "SELECT * FROM assignments WHERE canvas_uid = ?", (a["uid"],)
@@ -28,7 +28,7 @@ def sync_assignments() -> dict:
                            (canvas_uid, course, course_code, title, due_at, all_day, url, last_seen_at)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (a["uid"], a["course"], a["course_code"], a["title"],
-                         a["due_at"], a["all_day"], a["url"], now),
+                         a["due_at"], int(a["all_day"]), a["url"], now),
                     )
                     added += 1
                     continue
@@ -50,7 +50,7 @@ def sync_assignments() -> dict:
                            all_day = ?, url = ?, last_seen_at = ?
                        WHERE id = ?""",
                     (a["course"], a["course_code"], a["title"], a["due_at"],
-                     a["all_day"], a["url"], now, row["id"]),
+                     int(a["all_day"]), a["url"], now, row["id"]),
                 )
     finally:
         conn.close()

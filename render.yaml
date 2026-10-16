@@ -1,0 +1,20 @@
+# Render Blueprint: Render reads this to create the Retrace web service for free.
+# Values marked sync: false are secrets; Render asks you for them once, during setup.
+services:
+  - type: web
+    name: retrace
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CARMEN_FEED_URL
+        sync: false
+      - key: RETRACE_API_KEY
+        sync: false

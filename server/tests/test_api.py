@@ -1,4 +1,3 @@
-import anthropic
 import pytest
 from fastapi.testclient import TestClient
 
@@ -47,7 +46,7 @@ def test_capture_saves_items(client, monkeypatch):
 
 def test_capture_falls_back_to_note_when_ai_fails(client, monkeypatch):
     def broken(text, course_codes):
-        raise anthropic.APIConnectionError(request=None)
+        raise ConnectionError("no internet")
 
     monkeypatch.setattr(main, "parse_capture", broken)
 
@@ -58,8 +57,8 @@ def test_capture_falls_back_to_note_when_ai_fails(client, monkeypatch):
     assert body["items"][0]["title"] == "call mom"
 
 
-def test_capture_without_anthropic_key_is_saved_as_note(client, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+def test_capture_without_gemini_key_is_saved_as_note(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     capture.get_client.cache_clear()
 
     body = client.post("/captures", json={"text": "buy printer paper"}, headers=AUTH).json()
@@ -84,14 +83,15 @@ def test_mark_done_and_archive(client, monkeypatch):
 
 def add_assignment(title, due_at):
     conn = main.connect()
-    with conn:
-        cursor = conn.execute(
+    with conn.transaction():
+        row = conn.execute(
             """INSERT INTO assignments (canvas_uid, course_code, title, due_at, last_seen_at)
-               VALUES (?, 'CSE 2221', ?, ?, '2026-10-01T00:00:00+00:00')""",
+               VALUES (?, 'CSE 2221', ?, ?, '2026-10-01T00:00:00+00:00')
+               RETURNING id""",
             (f"event-assignment-{title}", title, due_at),
-        )
+        ).fetchone()
     conn.close()
-    return cursor.lastrowid
+    return row["id"]
 
 
 def test_one_list_merges_items_and_assignments(client, monkeypatch):
@@ -122,25 +122,21 @@ def test_marking_assignment_done_hides_it(client):
     assert len(client.get("/list", headers=AUTH).json()) == 1
 
 
-def test_init_db_adds_missing_columns(tmp_path, monkeypatch):
-    import sqlite3
-
+def test_init_db_adds_missing_columns():
     import db
 
-    old = tmp_path / "old.db"
-    conn = sqlite3.connect(old)
-    conn.execute("CREATE TABLE assignments (id INTEGER PRIMARY KEY, canvas_uid TEXT, "
-                 "course TEXT, course_code TEXT, title TEXT, due_at TEXT, all_day INTEGER, "
-                 "url TEXT, last_seen_at TEXT)")
+    # Pretend this database was created before done_at existed
+    conn = db.connect()
+    with conn.transaction():
+        conn.execute("ALTER TABLE assignments DROP COLUMN done_at")
+    assert "done_at" not in db.existing_columns(conn, "assignments")
     conn.close()
-    monkeypatch.setattr(db, "DB_PATH", old)
 
     db.init_db()
 
-    conn = sqlite3.connect(old)
-    columns = [row[1] for row in conn.execute("PRAGMA table_info(assignments)")]
+    conn = db.connect()
+    assert "done_at" in db.existing_columns(conn, "assignments")
     conn.close()
-    assert "done_at" in columns
 
 
 def test_capture_returns_readable_summary(client, monkeypatch):
@@ -183,23 +179,39 @@ def test_to_due_handles_missing_and_bad_values():
     assert to_due(parsed("next friday")) == (None, False)
 
 
-def test_parse_capture_drops_unknown_courses(monkeypatch):
-    class FakeResponse:
-        stop_reason = "end_turn"
-        parsed_output = capture.ParsedCapture(items=[
-            ParsedItem(type="task", title="Study", due_date=None, due_time=None,
-                       course="BIO 1101", place=None),
-        ])
+def fake_gemini(output_text, seen=None):
+    class FakeInteraction:
+        pass
 
     class FakeClient:
-        class beta:
-            class messages:
-                @staticmethod
-                def parse(**kwargs):
-                    assert "CSE 2321" in kwargs["messages"][0]["content"]
-                    return FakeResponse()
+        class interactions:
+            @staticmethod
+            def create(**kwargs):
+                if seen is not None:
+                    seen.update(kwargs)
+                reply = FakeInteraction()
+                reply.output_text = output_text
+                return reply
 
-    monkeypatch.setattr(capture, "get_client", lambda: FakeClient())
-    items, raw = capture.parse_capture("study for bio", ["CSE 2321"])
+    return lambda: FakeClient()
+
+
+def test_parse_capture_reads_gemini_json_and_drops_unknown_courses(monkeypatch):
+    seen = {}
+    reply = ('{"items": [{"type": "task", "title": "Study", "due_date": "2026-10-23", '
+             '"due_time": null, "course": "BIO 1101", "place": null}]}')
+    monkeypatch.setattr(capture, "get_client", fake_gemini(reply, seen))
+
+    items, raw = capture.parse_capture("study for bio by friday", ["CSE 2321"])
+
+    assert "CSE 2321" in seen["input"]
+    assert seen["response_format"]["schema"] == capture.CAPTURE_SCHEMA
     assert items[0]["course"] is None
+    assert items[0]["due_at"] == "2026-10-24T03:59:00+00:00"
     assert '"Study"' in raw
+
+
+def test_parse_capture_rejects_malformed_reply(monkeypatch):
+    monkeypatch.setattr(capture, "get_client", fake_gemini('{"items": [{"title": 5}]}'))
+    with pytest.raises(Exception):
+        capture.parse_capture("anything", [])

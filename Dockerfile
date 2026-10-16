@@ -14,9 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server/ ./
 COPY --from=web /mobile/dist ./web
 
-# /data is a persistent volume on the host, so the database survives redeploys
+# Data lives in the Postgres database named by DATABASE_URL, not inside this container,
+# so redeploys never lose anything
 ENV RETRACE_WEB_DIR=/app/web \
-    RETRACE_DB_PATH=/data/retrace.db \
     PYTHONUNBUFFERED=1
 
 # The host tells the server which port to use through $PORT

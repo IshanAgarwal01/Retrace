@@ -3,12 +3,40 @@ from datetime import date, datetime, time
 from functools import cache
 from typing import Literal
 
-import anthropic
+from google import genai
 from pydantic import BaseModel
 
 from carmen import COLUMBUS, normalize_due
 
-MODEL = "claude-opus-5-5"
+# A Gemini model on the free tier (ai.google.dev/gemini-api/docs/pricing)
+MODEL = "gemini-3.8-flash"
+
+ITEM_TYPES = ["task", "reminder", "idea", "song", "note", "question"]
+NULLABLE_STRING = {"type": ["string", "null"]}
+
+# JSON Schema the model's reply must follow. Written out by hand (instead of
+# ParsedCapture.model_json_schema()) so it has no $ref links for the API to resolve.
+CAPTURE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": ITEM_TYPES},
+                    "title": {"type": "string"},
+                    "due_date": {**NULLABLE_STRING, "description": "YYYY-MM-DD, Columbus time"},
+                    "due_time": {**NULLABLE_STRING, "description": "HH:MM, 24-hour"},
+                    "course": NULLABLE_STRING,
+                    "place": NULLABLE_STRING,
+                },
+                "required": ["type", "title", "due_date", "due_time", "course", "place"],
+            },
+        },
+    },
+    "required": ["items"],
+}
 
 SYSTEM = """You sort quick thoughts captured by a college student at Ohio State into structured items.
 
@@ -41,11 +69,11 @@ class CaptureError(Exception):
 
 
 @cache
-def get_client() -> anthropic.Anthropic:
-    # Created on first use, so the server still starts without ANTHROPIC_API_KEY set
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise CaptureError("ANTHROPIC_API_KEY is not set in .env")
-    return anthropic.Anthropic()
+def get_client() -> genai.Client:
+    # Created on first use, so the server still starts without GEMINI_API_KEY set
+    if not os.environ.get("GEMINI_API_KEY"):
+        raise CaptureError("GEMINI_API_KEY is not set")
+    return genai.Client()  # reads GEMINI_API_KEY from the environment
 
 
 def to_due(item: ParsedItem) -> tuple[str | None, bool]:
@@ -63,28 +91,27 @@ def to_due(item: ParsedItem) -> tuple[str | None, bool]:
 
 
 def parse_capture(text: str, course_codes: list[str]) -> tuple[list[dict], str]:
-    """Ask Claude to turn raw text into items. Returns (items, raw JSON it sent back)."""
+    """Ask Gemini to turn raw text into items. Returns (items, raw JSON it sent back)."""
     now = datetime.now(COLUMBUS)
     prompt = (
         f"Current date and time: {now:%A, %B %d, %Y, %I:%M %p} (Columbus, Ohio)\n"
         f"Courses: {', '.join(course_codes) or 'none known'}\n\n"
         f"Captured text:\n{text}"
     )
-    response = get_client().beta.messages.parse(
+    interaction = get_client().interactions.create(
         model=MODEL,
-        max_tokens=16000,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-        output_format=ParsedCapture,
-        output_config={"effort": "low"},
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
+        system_instruction=SYSTEM,
+        input=prompt,
+        response_format={"type": "text", "mime_type": "application/json", "schema": CAPTURE_SCHEMA},
+        generation_config={"thinking_level": "low"},
     )
-    if response.stop_reason == "refusal" or response.parsed_output is None:
-        raise CaptureError(f"Claude returned no items (stop_reason={response.stop_reason})")
+    if not interaction.output_text:
+        raise CaptureError("Gemini returned no text")
+    # Validate it ourselves too: the schema shapes the reply, Pydantic double-checks it
+    capture = ParsedCapture.model_validate_json(interaction.output_text)
 
     items = []
-    for parsed in response.parsed_output.items:
+    for parsed in capture.items:
         due_at, all_day = to_due(parsed)
         items.append({
             "type": parsed.type,
@@ -95,8 +122,8 @@ def parse_capture(text: str, course_codes: list[str]) -> tuple[list[dict], str]:
             "place": parsed.place,
         })
     if not items:
-        raise CaptureError("Claude returned an empty list")
-    return items, response.parsed_output.model_dump_json()
+        raise CaptureError("Gemini returned an empty list")
+    return items, capture.model_dump_json()
 
 
 TYPE_LABELS = {"task": "Task", "reminder": "Reminder", "idea": "Idea", "song": "Song",
