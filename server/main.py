@@ -213,10 +213,13 @@ def one_list():
             """SELECT id, type, title, course, due_at, all_day, place
                FROM items WHERE status = 'open'"""
         ).fetchall()
+        # Every sync stamps the assignments it saw with the same last_seen_at, so rows
+        # missing from the latest sync are ones a professor deleted from Carmen
         assignments = conn.execute(
             """SELECT id, title, course_code, due_at, all_day, url
                FROM assignments
-               WHERE done_at IS NULL AND due_at >= ?""",
+               WHERE done_at IS NULL AND due_at >= ?
+                 AND last_seen_at = (SELECT MAX(last_seen_at) FROM assignments)""",
             (since,),
         ).fetchall()
     finally:

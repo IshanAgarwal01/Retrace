@@ -122,6 +122,52 @@ def test_marking_assignment_done_hides_it(client):
     assert len(client.get("/list", headers=AUTH).json()) == 1
 
 
+FEED = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:test
+BEGIN:VEVENT
+UID:event-assignment-1
+DTSTART:20991024T035900Z
+SUMMARY:Homework #22 [CSE 2221 AU2026 (4829)]
+END:VEVENT
+BEGIN:VEVENT
+UID:event-assignment-2
+DTSTART;VALUE=DATE:20991206
+SUMMARY:Post-Course Survey [GENED 1201 AU2026 (30163)]
+END:VEVENT
+BEGIN:VEVENT
+UID:event-calendar-event-9
+DTSTART:20991020T180000Z
+SUMMARY:Office Hours
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def use_feed(monkeypatch, text):
+    import sync
+
+    monkeypatch.setattr(sync, "download_feed", lambda url: text.replace("\n", "\r\n").encode())
+
+
+def test_sync_adds_then_detects_changes_and_deletions(client, monkeypatch):
+    use_feed(monkeypatch, FEED)
+    first = client.post("/sync", headers=AUTH).json()
+    assert (first["fetched"], first["added"], first["changes"]) == (2, 2, [])  # office hours skipped
+
+    assert client.post("/sync", headers=AUTH).json()["added"] == 0  # no duplicates
+
+    # The professor moves Homework #22 and deletes the survey
+    moved = FEED.replace("20991024T035900Z", "20991027T035900Z")
+    moved = moved.split("BEGIN:VEVENT\nUID:event-assignment-2")[0] + "END:VCALENDAR\n"
+    use_feed(monkeypatch, moved)
+    third = client.post("/sync", headers=AUTH).json()
+
+    assert [(c["title"], c["field"]) for c in third["changes"]] == [("Homework #22", "due_at")]
+    assert [e["title"] for e in client.get("/list", headers=AUTH).json()] == ["Homework #22"]
+    assert len(client.get("/changes", headers=AUTH).json()) == 1
+
+
 def test_init_db_adds_missing_columns():
     import db
 

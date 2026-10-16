@@ -16,11 +16,15 @@ def sync_assignments() -> dict:
 
     conn = connect()
     try:
+        # Load everything already stored in one query. Asking the hosted database once
+        # per assignment would mean ~140 network round trips on every sync.
+        stored = {
+            row["canvas_uid"]: row
+            for row in conn.execute("SELECT * FROM assignments").fetchall()
+        }
         with conn.transaction():  # either everything saves, or nothing does
             for a in assignments:
-                row = conn.execute(
-                    "SELECT * FROM assignments WHERE canvas_uid = ?", (a["uid"],)
-                ).fetchone()
+                row = stored.get(a["uid"])
 
                 if row is None:
                     conn.execute(
