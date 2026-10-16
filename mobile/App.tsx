@@ -178,6 +178,10 @@ function Main() {
           refreshing={refreshing}
           onRefresh={refresh}
           stickySectionHeadersEnabled={false}
+          // Draw every row up front. By default only the first ~10 render until you
+          // scroll, and a short list on a tall screen can't scroll, so the rest never
+          // appeared. A few hundred rows is cheap to draw at once.
+          initialNumToRender={500}
           contentContainerStyle={styles.listContent}
           renderSectionHeader={({ section }) => (
             <Text
