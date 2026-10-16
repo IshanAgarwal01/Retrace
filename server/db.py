@@ -24,6 +24,22 @@ CREATE TABLE IF NOT EXISTS assignment_changes (
     new_value     TEXT,
     detected_at   TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS items (
+    id         INTEGER PRIMARY KEY,
+    type       TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'open',
+    due_at     TEXT,
+    all_day    INTEGER NOT NULL DEFAULT 0,
+    course     TEXT,
+    place      TEXT,
+    raw_text   TEXT NOT NULL,
+    ai_output  TEXT,
+    created_at TEXT NOT NULL,
+    done_at    TEXT
+);
 """
 
 

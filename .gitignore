@@ -15,3 +15,6 @@ __pycache__/
 # Editor / OS clutter
 .vscode/
 Thumbs.db
+
+# Test cache
+.pytest_cache/
