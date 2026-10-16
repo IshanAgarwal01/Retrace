@@ -82,6 +82,67 @@ def test_mark_done_and_archive(client, monkeypatch):
     assert client.patch("/items/999", json={"status": "done"}, headers=AUTH).status_code == 404
 
 
+def add_assignment(title, due_at):
+    conn = main.connect()
+    with conn:
+        cursor = conn.execute(
+            """INSERT INTO assignments (canvas_uid, course_code, title, due_at, last_seen_at)
+               VALUES (?, 'CSE 2221', ?, ?, '2026-10-01T00:00:00+00:00')""",
+            (f"event-assignment-{title}", title, due_at),
+        )
+    conn.close()
+    return cursor.lastrowid
+
+
+def test_one_list_merges_items_and_assignments(client, monkeypatch):
+    item = {"type": "task", "title": "Buy paper", "due_at": None, "all_day": False,
+            "course": None, "place": None}
+    monkeypatch.setattr(main, "parse_capture", fake_parse([item]))
+    client.post("/captures", json={"text": "buy paper"}, headers=AUTH)
+    add_assignment("Homework 1", "2099-01-01T04:59:00+00:00")
+    add_assignment("Ancient homework", "2000-01-01T04:59:00+00:00")
+
+    entries = client.get("/list", headers=AUTH).json()
+
+    # Dated entries first, undated last; long-past assignments are left out
+    assert [(e["kind"], e["title"]) for e in entries] == [
+        ("assignment", "Homework 1"),
+        ("item", "Buy paper"),
+    ]
+
+
+def test_marking_assignment_done_hides_it(client):
+    assignment_id = add_assignment("Homework 2", "2099-01-01T04:59:00+00:00")
+
+    response = client.patch(f"/assignments/{assignment_id}", json={"done": True}, headers=AUTH)
+
+    assert response.json()["done_at"]
+    assert client.get("/list", headers=AUTH).json() == []
+    client.patch(f"/assignments/{assignment_id}", json={"done": False}, headers=AUTH)
+    assert len(client.get("/list", headers=AUTH).json()) == 1
+
+
+def test_init_db_adds_missing_columns(tmp_path, monkeypatch):
+    import sqlite3
+
+    import db
+
+    old = tmp_path / "old.db"
+    conn = sqlite3.connect(old)
+    conn.execute("CREATE TABLE assignments (id INTEGER PRIMARY KEY, canvas_uid TEXT, "
+                 "course TEXT, course_code TEXT, title TEXT, due_at TEXT, all_day INTEGER, "
+                 "url TEXT, last_seen_at TEXT)")
+    conn.close()
+    monkeypatch.setattr(db, "DB_PATH", old)
+
+    db.init_db()
+
+    conn = sqlite3.connect(old)
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(assignments)")]
+    conn.close()
+    assert "done_at" in columns
+
+
 def test_empty_capture_is_rejected(client):
     assert client.post("/captures", json={"text": ""}, headers=AUTH).status_code == 422
 

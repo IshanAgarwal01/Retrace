@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS assignments (
     due_at       TEXT,
     all_day      INTEGER NOT NULL DEFAULT 0,
     url          TEXT,
-    last_seen_at TEXT NOT NULL
+    last_seen_at TEXT NOT NULL,
+    done_at      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS assignment_changes (
@@ -50,7 +51,20 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+# Columns added after a table was first created. CREATE TABLE IF NOT EXISTS skips
+# tables that already exist, so older databases get these with ALTER TABLE instead.
+ADDED_COLUMNS = [
+    ("assignments", "done_at", "TEXT"),
+]
+
+
 def init_db() -> None:
     conn = connect()
     conn.executescript(SCHEMA)
+    for table, column, column_type in ADDED_COLUMNS:
+        existing = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
+        if column not in existing:
+            # Safe to format: these names come from the constant above, never from users
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+    conn.commit()
     conn.close()

@@ -1,10 +1,11 @@
 import logging
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
@@ -16,6 +17,15 @@ log = logging.getLogger("retrace")
 
 init_db()
 app = FastAPI(title="Retrace")
+
+# Lets the Expo web preview (http://localhost:8081) call this server from a browser.
+# The phone app is not a browser, so it doesn't need this.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8081"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -37,6 +47,14 @@ class CaptureIn(BaseModel):
 
 class ItemUpdate(BaseModel):
     status: Literal["open", "done", "archived"]
+
+
+class AssignmentUpdate(BaseModel):
+    done: bool
+
+
+# How far back unfinished Carmen assignments still show up in the list
+OVERDUE_WINDOW = timedelta(days=3)
 
 
 @app.get("/health")
@@ -150,6 +168,61 @@ def update_item(item_id: int, update: ItemUpdate):
     finally:
         conn.close()
     return dict(row)
+
+
+@api.patch("/assignments/{assignment_id}")
+def update_assignment(assignment_id: int, update: AssignmentUpdate):
+    done_at = datetime.now(timezone.utc).isoformat() if update.done else None
+    conn = connect()
+    try:
+        with conn:
+            cursor = conn.execute(
+                "UPDATE assignments SET done_at = ? WHERE id = ?", (done_at, assignment_id)
+            )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        row = conn.execute("SELECT * FROM assignments WHERE id = ?", (assignment_id,)).fetchone()
+    finally:
+        conn.close()
+    return dict(row)
+
+
+@api.get("/list")
+def one_list():
+    """Open captures and unfinished Carmen assignments, merged into one list.
+
+    Grouping into Today / This week / Later happens on the phone, which knows
+    the local time zone.
+    """
+    since = (datetime.now(timezone.utc) - OVERDUE_WINDOW).isoformat()
+    conn = connect()
+    try:
+        items = conn.execute(
+            """SELECT id, type, title, course, due_at, all_day, place
+               FROM items WHERE status = 'open'"""
+        ).fetchall()
+        assignments = conn.execute(
+            """SELECT id, title, course_code, due_at, all_day, url
+               FROM assignments
+               WHERE done_at IS NULL AND due_at >= ?""",
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    entries = [
+        {"kind": "item", "id": row["id"], "type": row["type"], "title": row["title"],
+         "course": row["course"], "due_at": row["due_at"], "all_day": bool(row["all_day"]),
+         "place": row["place"], "url": None}
+        for row in items
+    ] + [
+        {"kind": "assignment", "id": row["id"], "type": "assignment", "title": row["title"],
+         "course": row["course_code"], "due_at": row["due_at"], "all_day": bool(row["all_day"]),
+         "place": None, "url": row["url"]}
+        for row in assignments
+    ]
+    entries.sort(key=lambda e: (e["due_at"] is None, e["due_at"] or ""))
+    return entries
 
 
 app.include_router(api)
