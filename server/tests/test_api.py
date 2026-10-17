@@ -1,20 +1,9 @@
 import pytest
-from fastapi.testclient import TestClient
 
 import capture
 import main
 from capture import ParsedItem, to_due
-
-AUTH = {"X-API-Key": "test-key"}
-
-
-@pytest.fixture
-def client():
-    return TestClient(main.app)
-
-
-def fake_parse(items):
-    return lambda text, course_codes: (items, '{"items": "..."}')
+from helpers import AUTH, FEED, add_assignment, fake_parse, use_feed
 
 
 def test_health_needs_no_key(client):
@@ -81,19 +70,6 @@ def test_mark_done_and_archive(client, monkeypatch):
     assert client.patch("/items/999", json={"status": "done"}, headers=AUTH).status_code == 404
 
 
-def add_assignment(title, due_at):
-    conn = main.connect()
-    with conn.transaction():
-        row = conn.execute(
-            """INSERT INTO assignments (canvas_uid, course_code, title, due_at, last_seen_at)
-               VALUES (?, 'CSE 2221', ?, ?, '2026-10-01T00:00:00+00:00')
-               RETURNING id""",
-            (f"event-assignment-{title}", title, due_at),
-        ).fetchone()
-    conn.close()
-    return row["id"]
-
-
 def test_one_list_merges_items_and_assignments(client, monkeypatch):
     item = {"type": "task", "title": "Buy paper", "due_at": None, "all_day": False,
             "course": None, "place": None}
@@ -120,34 +96,6 @@ def test_marking_assignment_done_hides_it(client):
     assert client.get("/list", headers=AUTH).json() == []
     client.patch(f"/assignments/{assignment_id}", json={"done": False}, headers=AUTH)
     assert len(client.get("/list", headers=AUTH).json()) == 1
-
-
-FEED = """BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:test
-BEGIN:VEVENT
-UID:event-assignment-1
-DTSTART:20991024T035900Z
-SUMMARY:Homework #22 [CSE 2221 AU2026 (4829)]
-END:VEVENT
-BEGIN:VEVENT
-UID:event-assignment-2
-DTSTART;VALUE=DATE:20991206
-SUMMARY:Post-Course Survey [GENED 1201 AU2026 (30163)]
-END:VEVENT
-BEGIN:VEVENT
-UID:event-calendar-event-9
-DTSTART:20991020T180000Z
-SUMMARY:Office Hours
-END:VEVENT
-END:VCALENDAR
-"""
-
-
-def use_feed(monkeypatch, text):
-    import sync
-
-    monkeypatch.setattr(sync, "download_feed", lambda url: text.replace("\n", "\r\n").encode())
 
 
 def test_sync_adds_then_detects_changes_and_deletions(client, monkeypatch):

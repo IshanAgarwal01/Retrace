@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import secrets
@@ -11,8 +12,15 @@ from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import ghosts
+import loops
+import notify
+from brief import build_brief
 from capture import parse_capture, summarize
 from db import connect, init_db
+import retrace
+from queries import (LIVE_ASSIGNMENT, assignment_entry, by_due, due_between, item_entry,
+                     latest_context, recent_captures)
 from sync import sync_assignments
 
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +60,23 @@ api = APIRouter(dependencies=[Depends(require_api_key)])
 class CaptureIn(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
     source: Literal["text", "voice", "share"] = "text"
+
+
+class ContextIn(BaseModel):
+    place: str = Field(min_length=1, max_length=120)
+    source: str = Field(default="shortcut", max_length=40)
+
+
+class RetraceStart(BaseModel):
+    ghost_id: int | None = None  # opened from a "lost a thought here" notification
+
+
+class RetraceEnd(BaseModel):
+    outcome: Literal["recovered", "ghost", "gave_up"]
+    text: str | None = Field(default=None, max_length=5000)  # the thought, when recovered
+    item_id: int | None = None  # or: it was an item already on your list, so nothing new to save
+    cue: str | None = Field(default=None, max_length=200)    # e.g. "item:12" or "chip:buy"
+    ghost_id: int | None = None  # the ghost this session was chasing, if any
 
 
 class ItemUpdate(BaseModel):
@@ -104,13 +129,64 @@ def list_changes():
 
 @api.post("/sync")
 def sync():
+    """Pull Carmen. cron-job.org calls this every hour."""
+    forget_old_contexts()  # first, so it still happens if Carmen is down
     result = sync_assignments()
     log.info("Carmen sync: %s added, %s changes", result["added"], len(result["changes"]))
+
+    # One notification per run, listing every moved deadline
+    moved = [c for c in result["changes"] if c["field"] == "due_at"]
+    if moved:
+        lines = [f"{c['title']}: {notify.local_time(c['old'])} -> {notify.local_time(c['new'])}"
+                 for c in moved]
+        title = "Carmen deadline moved" if len(moved) == 1 else f"{len(moved)} Carmen deadlines moved"
+        conn = connect()
+        try:
+            notify.nudge(conn, "deadline_change", None, title, "\n".join(lines))
+        finally:
+            conn.close()
     return result
 
 
-@api.post("/captures", status_code=201)
-def create_capture(capture: CaptureIn):
+def forget_old_contexts() -> None:
+    cutoff = (datetime.now(timezone.utc) - CONTEXT_KEEP).isoformat()
+    conn = connect()
+    try:
+        with conn.transaction():
+            old = """SELECT id FROM contexts
+                     WHERE at < ?
+                       AND id NOT IN (SELECT context_id FROM items WHERE context_id IS NOT NULL)
+                       AND id NOT IN (SELECT context_id FROM ghosts WHERE context_id IS NOT NULL)"""
+            # Retrace sessions just forget the place rather than keep it alive
+            conn.execute(f"UPDATE retrace_sessions SET context_id = NULL WHERE context_id IN ({old})",
+                         (cutoff,))
+            conn.execute(f"DELETE FROM contexts WHERE id IN ({old})", (cutoff,))
+    finally:
+        conn.close()
+
+
+@api.post("/brief")
+def morning_brief():
+    """Send the morning brief. cron-job.org calls this daily at 7:30 AM."""
+    conn = connect()
+    try:
+        title, message = build_brief(conn)
+        sent = notify.nudge(conn, "brief", None, title, message)
+    finally:
+        conn.close()
+    return {"sent": sent, "title": title, "message": message}
+
+
+# A capture remembers where you were if the phone reported a place this recently
+CONTEXT_FRESHNESS = timedelta(hours=2)
+# The loop detector compares a new capture with at most this many open items
+LOOP_LOOKBACK = 300
+# Places older than this are forgotten, unless a capture or lost thought points at them
+CONTEXT_KEEP = timedelta(days=30)
+
+
+def save_capture(text: str, source: str) -> dict:
+    """Sort raw text into items and save them. Shared by POST /captures and Retrace."""
     conn = connect()
     try:
         course_codes = [
@@ -121,33 +197,189 @@ def create_capture(capture: CaptureIn):
         ]
 
         try:
-            parsed, ai_output = parse_capture(capture.text, course_codes)
+            parsed, ai_output = parse_capture(text, course_codes)
         except Exception:
             # Never lose a thought: if the AI step fails for any reason, keep the raw
             # text as a note. The full error still goes to the server log.
             log.exception("AI parsing failed; saving capture as a plain note")
-            parsed = [{"type": "note", "title": capture.text[:120], "due_at": None,
+            parsed = [{"type": "note", "title": text[:120], "due_at": None,
                        "all_day": False, "course": None, "place": None}]
             ai_output = None
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        context = latest_context(conn, since=(now - CONTEXT_FRESHNESS).isoformat())
+        context_id = context["id"] if context else None
+
+        # Loop detector: compare against what's still open, before adding the new items
+        open_items = conn.execute(
+            "SELECT title, embedding FROM items WHERE status = 'open' ORDER BY created_at DESC LIMIT ?",
+            (LOOP_LOOKBACK,),
+        ).fetchall()
+        vectors = loops.embed([item["title"] for item in parsed])
+        loop_note = loops.loop_note(parsed, vectors, open_items)
+
         saved = []
         with conn.transaction():
-            for item in parsed:
+            for index, item in enumerate(parsed):
                 cursor = conn.execute(
                     """INSERT INTO items
                        (type, title, source, due_at, all_day, course, place,
-                        raw_text, ai_output, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        raw_text, ai_output, created_at, context_id, embedding)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        RETURNING id""",
-                    (item["type"], item["title"], capture.source, item["due_at"],
+                    (item["type"], item["title"], source, item["due_at"],
                      int(item["all_day"]), item["course"], item["place"],
-                     capture.text, ai_output, now),
+                     text, ai_output, now.isoformat(), context_id,
+                     json.dumps(vectors[index]) if vectors else None),
                 )
                 saved.append({"id": cursor.fetchone()["id"], **item, "status": "open"})
     finally:
         conn.close()
-    return {"ai_ok": ai_output is not None, "summary": summarize(parsed), "items": saved}
+    summary = summarize(parsed) + (f"\n{loop_note}" if loop_note else "")
+    return {"ai_ok": ai_output is not None, "summary": summary, "loop": loop_note, "items": saved}
+
+
+@api.post("/captures", status_code=201)
+def create_capture(capture: CaptureIn):
+    return save_capture(capture.text, capture.source)
+
+
+@api.post("/contexts", status_code=201)
+def add_context(context: ContextIn):
+    """Record where you are. Called by iOS Shortcuts automations ("When I arrive at Dreese")."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = connect()
+    try:
+        with conn.transaction():
+            context_id = conn.execute(
+                "INSERT INTO contexts (at, place, source) VALUES (?, ?, ?) RETURNING id",
+                (now, context.place.strip(), context.source),
+            ).fetchone()["id"]
+        # Arriving somewhere you once lost a thought may bring it back
+        prompted = ghosts.maybe_prompt(conn, context.place.strip())
+    finally:
+        conn.close()
+    return {"id": context_id, "at": now, "place": context.place.strip(), "ghost_prompted": prompted}
+
+
+def context_now(conn) -> dict:
+    """Where you last were, what's due in the next day, and what you captured lately."""
+    now = datetime.now(timezone.utc)
+    place = latest_context(conn)
+    return {
+        "place": {"place": place["place"], "at": place["at"]} if place else None,
+        "due_soon": due_between(conn, now.isoformat(), (now + timedelta(hours=24)).isoformat()),
+        "recent_captures": recent_captures(conn, 5),
+    }
+
+
+@api.get("/context/now")
+def get_context_now():
+    conn = connect()
+    try:
+        return context_now(conn)
+    finally:
+        conn.close()
+
+
+@api.post("/retrace", status_code=201)
+def start_retrace(start: RetraceStart | None = None):
+    """Start a lost-thought session: what you were up to, plus ranked guesses."""
+    now = datetime.now(timezone.utc)
+    conn = connect()
+    try:
+        strip = context_now(conn)
+        here = latest_context(conn, since=(now - CONTEXT_FRESHNESS).isoformat())
+        place = here["place"] if here else None
+
+        # Chasing a ghost: rank by where that thought was lost instead of where you are
+        ghost = None
+        if start and start.ghost_id:
+            ghost = conn.execute("SELECT * FROM ghosts WHERE id = ?", (start.ghost_id,)).fetchone()
+            if ghost is None:
+                raise HTTPException(status_code=404, detail="Ghost not found")
+            place = ghost["place"] or place
+            strip["ghost"] = {"id": ghost["id"], "place": ghost["place"],
+                              "lost_at": ghost["created_at"]}
+
+        guesses = retrace.rank_guesses(conn, now, place)
+
+        phrased_by_ai = False
+        top = guesses[:retrace.PHRASED_BY_AI]
+        if top:
+            try:
+                questions = retrace.phrase_questions(top)
+                for guess in top:
+                    guess["question"] = questions.get(guess["ref"], guess["question"])
+                phrased_by_ai = bool(questions)
+            except Exception:
+                # The template questions are already filled in, so just carry on
+                log.warning("Gemini couldn't word the Retrace questions; using templates",
+                            exc_info=True)
+
+        with conn.transaction():
+            session_id = conn.execute(
+                """INSERT INTO retrace_sessions (started_at, context_id, cues_shown)
+                   VALUES (?, ?, ?) RETURNING id""",
+                (now.isoformat(), here["id"] if here else None, retrace.cues_json(guesses)),
+            ).fetchone()["id"]
+    finally:
+        conn.close()
+    return {"id": session_id, "started_at": now.isoformat(), "context": strip,
+            "chips": retrace.CHIPS, "guesses": guesses, "phrased_by_ai": phrased_by_ai}
+
+
+@api.patch("/retrace/{session_id}")
+def end_retrace(session_id: int, end: RetraceEnd):
+    """Finish a session. "recovered" saves the thought like any other capture."""
+    if end.outcome == "recovered" and not end.item_id and not (end.text and end.text.strip()):
+        raise HTTPException(status_code=422, detail="A recovered thought needs its text")
+
+    conn = connect()
+    try:
+        session = conn.execute(
+            "SELECT * FROM retrace_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if session is None:
+            raise HTTPException(status_code=404, detail="Retrace session not found")
+        if session["outcome"]:
+            raise HTTPException(status_code=409, detail="This session already ended")
+
+        ghost = None
+        if end.ghost_id:
+            ghost = conn.execute("SELECT * FROM ghosts WHERE id = ?", (end.ghost_id,)).fetchone()
+            if ghost is None:
+                raise HTTPException(status_code=404, detail="Ghost not found")
+
+        captured = None
+        recovered_item_id = None
+        if end.outcome == "recovered" and end.item_id:
+            if not conn.execute("SELECT id FROM items WHERE id = ?", (end.item_id,)).fetchone():
+                raise HTTPException(status_code=404, detail="Item not found")
+            recovered_item_id = end.item_id
+        elif end.outcome == "recovered":
+            captured = save_capture(end.text.strip(), "recovered")
+            recovered_item_id = captured["items"][0]["id"]
+        now = datetime.now(timezone.utc)
+        seconds = int((now - datetime.fromisoformat(session["started_at"])).total_seconds())
+
+        with conn.transaction():
+            conn.execute(
+                """UPDATE retrace_sessions
+                   SET outcome = ?, cue_that_worked = ?, recovered_item_id = ?, seconds_taken = ?
+                   WHERE id = ?""",
+                (end.outcome, end.cue, recovered_item_id, seconds, session_id),
+            )
+            if ghost and recovered_item_id:
+                conn.execute("UPDATE ghosts SET resolved_item_id = ? WHERE id = ?",
+                             (recovered_item_id, ghost["id"]))
+            # Still gone: leave a ghost, unless this was already chasing one
+            if end.outcome == "ghost" and not ghost:
+                ghosts.create_ghost(conn, session)
+    finally:
+        conn.close()
+    return {"id": session_id, "outcome": end.outcome, "seconds_taken": seconds,
+            "recovered_item_id": recovered_item_id, "capture": captured}
 
 
 @api.get("/items")
@@ -213,31 +445,16 @@ def one_list():
             """SELECT id, type, title, course, due_at, all_day, place
                FROM items WHERE status = 'open'"""
         ).fetchall()
-        # Every sync stamps the assignments it saw with the same last_seen_at, so rows
-        # missing from the latest sync are ones a professor deleted from Carmen
         assignments = conn.execute(
-            """SELECT id, title, course_code, due_at, all_day, url
-               FROM assignments
-               WHERE done_at IS NULL AND due_at >= ?
-                 AND last_seen_at = (SELECT MAX(last_seen_at) FROM assignments)""",
+            f"""SELECT id, title, course_code, due_at, all_day, url
+                FROM assignments
+                WHERE {LIVE_ASSIGNMENT} AND due_at >= ?""",
             (since,),
         ).fetchall()
     finally:
         conn.close()
 
-    entries = [
-        {"kind": "item", "id": row["id"], "type": row["type"], "title": row["title"],
-         "course": row["course"], "due_at": row["due_at"], "all_day": bool(row["all_day"]),
-         "place": row["place"], "url": None}
-        for row in items
-    ] + [
-        {"kind": "assignment", "id": row["id"], "type": "assignment", "title": row["title"],
-         "course": row["course_code"], "due_at": row["due_at"], "all_day": bool(row["all_day"]),
-         "place": None, "url": row["url"]}
-        for row in assignments
-    ]
-    entries.sort(key=lambda e: (e["due_at"] is None, e["due_at"] or ""))
-    return entries
+    return by_due([item_entry(row) for row in items] + [assignment_entry(row) for row in assignments])
 
 
 app.include_router(api)

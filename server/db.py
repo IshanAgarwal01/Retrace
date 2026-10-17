@@ -51,6 +51,48 @@ CREATE TABLE IF NOT EXISTS items (
     ai_output  TEXT,
     created_at TEXT NOT NULL,
     done_at    TEXT
+);
+
+-- Every notification sent, so the daily cap can be enforced
+CREATE TABLE IF NOT EXISTS nudges (
+    id       {id},
+    kind     TEXT NOT NULL,
+    item_ref TEXT,
+    message  TEXT NOT NULL,
+    sent_at  TEXT NOT NULL
+);
+
+-- Where the phone was, reported by iOS Shortcuts arrival automations
+CREATE TABLE IF NOT EXISTS contexts (
+    id     {id},
+    at     TEXT NOT NULL,
+    place  TEXT NOT NULL,
+    source TEXT NOT NULL
+);
+
+-- One row per time you tapped "I lost a thought"
+CREATE TABLE IF NOT EXISTS retrace_sessions (
+    id                {id},
+    started_at        TEXT NOT NULL,
+    context_id        INTEGER,
+    cues_shown        TEXT NOT NULL,
+    cue_that_worked   TEXT,
+    outcome           TEXT,
+    recovered_item_id INTEGER,
+    seconds_taken     INTEGER
+);
+
+-- Thoughts that stayed lost ("Still gone"), remembered for two weeks
+CREATE TABLE IF NOT EXISTS ghosts (
+    id                 {id},
+    retrace_session_id INTEGER NOT NULL,
+    context_id         INTEGER,
+    place              TEXT,
+    hour               INTEGER NOT NULL,
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT NOT NULL,
+    prompted_at        TEXT,
+    resolved_item_id   INTEGER
 )
 """
 
@@ -63,6 +105,8 @@ ID_COLUMN = {
 # tables that already exist, so older databases get these with ALTER TABLE instead.
 ADDED_COLUMNS = [
     ("assignments", "done_at", "TEXT"),
+    ("items", "context_id", "INTEGER"),  # where you were when you captured it
+    ("items", "embedding", "TEXT"),      # JSON list of numbers, for the loop detector
 ]
 
 
