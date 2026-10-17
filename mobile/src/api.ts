@@ -31,6 +31,7 @@ export type CapturedItem = {
 export type CaptureResult = {
   ai_ok: boolean;
   summary: string; // one readable line per item, written by the server
+  loop: string | null; // "You've thought about this 3 times", when it keeps coming up
   items: CapturedItem[];
 };
 
@@ -45,6 +46,8 @@ export type ContextNow = {
   place: { place: string; at: string } | null;
   due_soon: Entry[];
   recent_captures: { id: number; type: string; title: string; status: string; created_at: string }[];
+  // Only on the Retrace screen, when it was opened from a "lost a thought here" notification
+  ghost?: { id: number; place: string | null; lost_at: string };
 };
 
 // One ranked "Was it...?" guess on the Retrace screen
@@ -75,6 +78,7 @@ export type RetraceEnd = {
   text?: string;
   item_id?: number; // the thought was this item, already on the list
   cue?: string;
+  ghost_id?: number;
 };
 
 export type RetraceResult = {
@@ -155,7 +159,8 @@ export const api = {
   completeAssignment: (s: Settings, id: number) =>
     request(s, `/assignments/${id}`, "PATCH", { done: true }),
   syncCarmen: (s: Settings) => request<SyncResult>(s, "/sync", "POST"),
-  startRetrace: (s: Settings) => request<RetraceSession>(s, "/retrace", "POST"),
+  startRetrace: (s: Settings, ghostId?: number) =>
+    request<RetraceSession>(s, "/retrace", "POST", ghostId ? { ghost_id: ghostId } : undefined),
   endRetrace: (s: Settings, id: number, end: RetraceEnd) =>
     request<RetraceResult>(s, `/retrace/${id}`, "PATCH", end),
 };

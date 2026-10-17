@@ -18,7 +18,8 @@ import pytest  # noqa: E402
 import db  # noqa: E402
 
 # Every table, for wiping a Postgres test database between tests
-TABLES = ["assignment_changes", "assignments", "items", "nudges", "contexts", "retrace_sessions"]
+TABLES = ["assignment_changes", "assignments", "items", "nudges", "contexts", "retrace_sessions",
+          "ghosts"]
 
 
 @pytest.fixture(autouse=True)

@@ -19,6 +19,8 @@ import type { Theme } from "./theme";
 type Props = {
   theme: Theme;
   settings: Settings;
+  // Set when opened from a notification about a thought lost earlier
+  ghostId?: number;
   // Called when the screen closes; `message` is shown as a banner on the main list
   onDone: (message: string | null) => void;
 };
@@ -26,7 +28,7 @@ type Props = {
 // What you said about a guess: it was the thought, or it was close
 type Mark = "yes" | "close";
 
-export function RetraceScreen({ theme, settings, onDone }: Props) {
+export function RetraceScreen({ theme, settings, ghostId, onDone }: Props) {
   const [session, setSession] = useState<RetraceSession | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [chip, setChip] = useState<string | null>(null);
@@ -41,10 +43,10 @@ export function RetraceScreen({ theme, settings, onDone }: Props) {
 
   useEffect(() => {
     api
-      .startRetrace(settings)
+      .startRetrace(settings, ghostId)
       .then(setSession)
       .catch((e) => setError(errorMessage(e)));
-  }, [settings]);
+  }, [settings, ghostId]);
 
   // Tapping a type chip moves the guesses of that type to the top. The server already
   // ranked them; sort is stable, so the ranking holds within each group.
@@ -58,7 +60,7 @@ export function RetraceScreen({ theme, settings, onDone }: Props) {
     if (!session) return onDone(null);
     setSaving(true);
     try {
-      const result = await api.endRetrace(settings, session.id, end);
+      const result = await api.endRetrace(settings, session.id, { ...end, ghost_id: ghostId });
       if (result.capture) message = `Got it back! ${result.capture.summary}`;
       onDone(message);
     } catch (e) {
@@ -80,7 +82,9 @@ export function RetraceScreen({ theme, settings, onDone }: Props) {
   function close() {
     // Leaving without an answer still counts, so the session isn't left open.
     // Don't wait for it: the screen closes right away either way.
-    if (session) api.endRetrace(settings, session.id, { outcome: "gave_up", cue }).catch(() => {});
+    if (session) {
+      api.endRetrace(settings, session.id, { outcome: "gave_up", cue, ghost_id: ghostId }).catch(() => {});
+    }
     onDone(null);
   }
 
@@ -119,6 +123,14 @@ export function RetraceScreen({ theme, settings, onDone }: Props) {
       {session && context && (
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           <View style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+            {context.ghost && (
+              <>
+                <Text style={[styles.cardLabel, { color: theme.muted }]}>The thought you lost</Text>
+                <Text style={[styles.cardText, { color: theme.text }]}>
+                  {[context.ghost.place, formatDue(context.ghost.lost_at, false)].filter(Boolean).join(" · ")}
+                </Text>
+              </>
+            )}
             <Text style={[styles.cardLabel, { color: theme.muted }]}>Where you were</Text>
             <Text style={[styles.cardText, { color: theme.text }]}>
               {context.place

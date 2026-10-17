@@ -29,13 +29,24 @@ export default function App() {
 }
 
 function describeCapture(result: CaptureResult): string {
-  if (!result.ai_ok) return "Saved as a note (AI sorting was unavailable)";
+  const loop = result.loop ? `\n${result.loop}` : "";
+  if (!result.ai_ok) return "Saved as a note (AI sorting was unavailable)" + loop;
   return result.items
     .map((item) => {
       const due = formatDue(item.due_at, item.all_day);
       return [`${typeLabel(item.type)}: ${item.title}`, item.course, due].filter(Boolean).join("  ·  ");
     })
-    .join("\n");
+    .join("\n") + loop;
+}
+
+// A ghost notification opens the web app at /?ghost=12 to go straight to Retrace
+function ghostFromUrl(): number | undefined {
+  if (Platform.OS !== "web") return undefined;
+  const id = Number(new URLSearchParams(globalThis.location?.search ?? "").get("ghost"));
+  if (!id) return undefined;
+  // Tidy the address so a reload doesn't reopen it
+  globalThis.history?.replaceState(null, "", globalThis.location.pathname);
+  return id;
 }
 
 function Main() {
@@ -43,7 +54,11 @@ function Main() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [editingSettings, setEditingSettings] = useState(false);
-  const [retracing, setRetracing] = useState(false);
+  // null = not on the Retrace screen; otherwise the ghost being chased, if any
+  const [retrace, setRetrace] = useState<{ ghostId?: number } | null>(() => {
+    const ghostId = ghostFromUrl();
+    return ghostId ? { ghostId } : null;
+  });
   const [entries, setEntries] = useState<Entry[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -152,15 +167,16 @@ function Main() {
     );
   }
 
-  if (retracing) {
+  if (retrace) {
     return (
       <SafeAreaView style={[styles.screen, { backgroundColor: theme.background }]}>
         <StatusBar style="auto" />
         <RetraceScreen
           theme={theme}
           settings={settings}
+          ghostId={retrace.ghostId}
           onDone={(message) => {
-            setRetracing(false);
+            setRetrace(null);
             if (message) setBanner(message);
             refresh();
           }}
@@ -186,7 +202,7 @@ function Main() {
         </View>
         <Pressable
           accessibilityRole="button"
-          onPress={() => setRetracing(true)}
+          onPress={() => setRetrace({})}
           style={[styles.lostButton, { borderColor: theme.accent }]}
         >
           <Text style={[styles.lostButtonText, { color: theme.accent }]}>I lost a thought</Text>

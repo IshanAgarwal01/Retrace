@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import secrets
@@ -11,6 +12,8 @@ from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import ghosts
+import loops
 import notify
 from brief import build_brief
 from capture import parse_capture, summarize
@@ -64,11 +67,16 @@ class ContextIn(BaseModel):
     source: str = Field(default="shortcut", max_length=40)
 
 
+class RetraceStart(BaseModel):
+    ghost_id: int | None = None  # opened from a "lost a thought here" notification
+
+
 class RetraceEnd(BaseModel):
     outcome: Literal["recovered", "ghost", "gave_up"]
     text: str | None = Field(default=None, max_length=5000)  # the thought, when recovered
     item_id: int | None = None  # or: it was an item already on your list, so nothing new to save
     cue: str | None = Field(default=None, max_length=200)    # e.g. "item:12" or "chip:buy"
+    ghost_id: int | None = None  # the ghost this session was chasing, if any
 
 
 class ItemUpdate(BaseModel):
@@ -145,12 +153,14 @@ def forget_old_contexts() -> None:
     conn = connect()
     try:
         with conn.transaction():
-            conn.execute(
-                """DELETE FROM contexts
-                   WHERE at < ?
-                     AND id NOT IN (SELECT context_id FROM items WHERE context_id IS NOT NULL)""",
-                (cutoff,),
-            )
+            old = """SELECT id FROM contexts
+                     WHERE at < ?
+                       AND id NOT IN (SELECT context_id FROM items WHERE context_id IS NOT NULL)
+                       AND id NOT IN (SELECT context_id FROM ghosts WHERE context_id IS NOT NULL)"""
+            # Retrace sessions just forget the place rather than keep it alive
+            conn.execute(f"UPDATE retrace_sessions SET context_id = NULL WHERE context_id IN ({old})",
+                         (cutoff,))
+            conn.execute(f"DELETE FROM contexts WHERE id IN ({old})", (cutoff,))
     finally:
         conn.close()
 
@@ -169,6 +179,8 @@ def morning_brief():
 
 # A capture remembers where you were if the phone reported a place this recently
 CONTEXT_FRESHNESS = timedelta(hours=2)
+# The loop detector compares a new capture with at most this many open items
+LOOP_LOOKBACK = 300
 # Places older than this are forgotten, unless a capture or lost thought points at them
 CONTEXT_KEEP = timedelta(days=30)
 
@@ -198,23 +210,33 @@ def save_capture(text: str, source: str) -> dict:
         context = latest_context(conn, since=(now - CONTEXT_FRESHNESS).isoformat())
         context_id = context["id"] if context else None
 
+        # Loop detector: compare against what's still open, before adding the new items
+        open_items = conn.execute(
+            "SELECT title, embedding FROM items WHERE status = 'open' ORDER BY created_at DESC LIMIT ?",
+            (LOOP_LOOKBACK,),
+        ).fetchall()
+        vectors = loops.embed([item["title"] for item in parsed])
+        loop_note = loops.loop_note(parsed, vectors, open_items)
+
         saved = []
         with conn.transaction():
-            for item in parsed:
+            for index, item in enumerate(parsed):
                 cursor = conn.execute(
                     """INSERT INTO items
                        (type, title, source, due_at, all_day, course, place,
-                        raw_text, ai_output, created_at, context_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        raw_text, ai_output, created_at, context_id, embedding)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        RETURNING id""",
                     (item["type"], item["title"], source, item["due_at"],
                      int(item["all_day"]), item["course"], item["place"],
-                     text, ai_output, now.isoformat(), context_id),
+                     text, ai_output, now.isoformat(), context_id,
+                     json.dumps(vectors[index]) if vectors else None),
                 )
                 saved.append({"id": cursor.fetchone()["id"], **item, "status": "open"})
     finally:
         conn.close()
-    return {"ai_ok": ai_output is not None, "summary": summarize(parsed), "items": saved}
+    summary = summarize(parsed) + (f"\n{loop_note}" if loop_note else "")
+    return {"ai_ok": ai_output is not None, "summary": summary, "loop": loop_note, "items": saved}
 
 
 @api.post("/captures", status_code=201)
@@ -233,9 +255,11 @@ def add_context(context: ContextIn):
                 "INSERT INTO contexts (at, place, source) VALUES (?, ?, ?) RETURNING id",
                 (now, context.place.strip(), context.source),
             ).fetchone()["id"]
+        # Arriving somewhere you once lost a thought may bring it back
+        prompted = ghosts.maybe_prompt(conn, context.place.strip())
     finally:
         conn.close()
-    return {"id": context_id, "at": now, "place": context.place.strip()}
+    return {"id": context_id, "at": now, "place": context.place.strip(), "ghost_prompted": prompted}
 
 
 def context_now(conn) -> dict:
@@ -259,14 +283,26 @@ def get_context_now():
 
 
 @api.post("/retrace", status_code=201)
-def start_retrace():
+def start_retrace(start: RetraceStart | None = None):
     """Start a lost-thought session: what you were up to, plus ranked guesses."""
     now = datetime.now(timezone.utc)
     conn = connect()
     try:
         strip = context_now(conn)
         here = latest_context(conn, since=(now - CONTEXT_FRESHNESS).isoformat())
-        guesses = retrace.rank_guesses(conn, now, here["place"] if here else None)
+        place = here["place"] if here else None
+
+        # Chasing a ghost: rank by where that thought was lost instead of where you are
+        ghost = None
+        if start and start.ghost_id:
+            ghost = conn.execute("SELECT * FROM ghosts WHERE id = ?", (start.ghost_id,)).fetchone()
+            if ghost is None:
+                raise HTTPException(status_code=404, detail="Ghost not found")
+            place = ghost["place"] or place
+            strip["ghost"] = {"id": ghost["id"], "place": ghost["place"],
+                              "lost_at": ghost["created_at"]}
+
+        guesses = retrace.rank_guesses(conn, now, place)
 
         phrased_by_ai = False
         top = guesses[:retrace.PHRASED_BY_AI]
@@ -309,6 +345,12 @@ def end_retrace(session_id: int, end: RetraceEnd):
         if session["outcome"]:
             raise HTTPException(status_code=409, detail="This session already ended")
 
+        ghost = None
+        if end.ghost_id:
+            ghost = conn.execute("SELECT * FROM ghosts WHERE id = ?", (end.ghost_id,)).fetchone()
+            if ghost is None:
+                raise HTTPException(status_code=404, detail="Ghost not found")
+
         captured = None
         recovered_item_id = None
         if end.outcome == "recovered" and end.item_id:
@@ -328,6 +370,12 @@ def end_retrace(session_id: int, end: RetraceEnd):
                    WHERE id = ?""",
                 (end.outcome, end.cue, recovered_item_id, seconds, session_id),
             )
+            if ghost and recovered_item_id:
+                conn.execute("UPDATE ghosts SET resolved_item_id = ? WHERE id = ?",
+                             (recovered_item_id, ghost["id"]))
+            # Still gone: leave a ghost, unless this was already chasing one
+            if end.outcome == "ghost" and not ghost:
+                ghosts.create_ghost(conn, session)
     finally:
         conn.close()
     return {"id": session_id, "outcome": end.outcome, "seconds_taken": seconds,

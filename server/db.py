@@ -80,6 +80,19 @@ CREATE TABLE IF NOT EXISTS retrace_sessions (
     outcome           TEXT,
     recovered_item_id INTEGER,
     seconds_taken     INTEGER
+);
+
+-- Thoughts that stayed lost ("Still gone"), remembered for two weeks
+CREATE TABLE IF NOT EXISTS ghosts (
+    id                 {id},
+    retrace_session_id INTEGER NOT NULL,
+    context_id         INTEGER,
+    place              TEXT,
+    hour               INTEGER NOT NULL,
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT NOT NULL,
+    prompted_at        TEXT,
+    resolved_item_id   INTEGER
 )
 """
 
@@ -93,6 +106,7 @@ ID_COLUMN = {
 ADDED_COLUMNS = [
     ("assignments", "done_at", "TEXT"),
     ("items", "context_id", "INTEGER"),  # where you were when you captured it
+    ("items", "embedding", "TEXT"),      # JSON list of numbers, for the loop detector
 ]
 
 
