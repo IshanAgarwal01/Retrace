@@ -51,6 +51,15 @@ CREATE TABLE IF NOT EXISTS items (
     ai_output  TEXT,
     created_at TEXT NOT NULL,
     done_at    TEXT
+);
+
+-- Every notification sent, so the daily cap can be enforced
+CREATE TABLE IF NOT EXISTS nudges (
+    id       {id},
+    kind     TEXT NOT NULL,
+    item_ref TEXT,
+    message  TEXT NOT NULL,
+    sent_at  TEXT NOT NULL
 )
 """
 

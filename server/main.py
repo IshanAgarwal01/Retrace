@@ -11,8 +11,11 @@ from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import notify
+from brief import build_brief
 from capture import parse_capture, summarize
 from db import connect, init_db
+from queries import LIVE_ASSIGNMENT, assignment_entry, by_due, item_entry
 from sync import sync_assignments
 
 logging.basicConfig(level=logging.INFO)
@@ -104,9 +107,34 @@ def list_changes():
 
 @api.post("/sync")
 def sync():
+    """Pull Carmen. cron-job.org calls this every hour."""
     result = sync_assignments()
     log.info("Carmen sync: %s added, %s changes", result["added"], len(result["changes"]))
+
+    # One notification per run, listing every moved deadline
+    moved = [c for c in result["changes"] if c["field"] == "due_at"]
+    if moved:
+        lines = [f"{c['title']}: {notify.local_time(c['old'])} -> {notify.local_time(c['new'])}"
+                 for c in moved]
+        title = "Carmen deadline moved" if len(moved) == 1 else f"{len(moved)} Carmen deadlines moved"
+        conn = connect()
+        try:
+            notify.nudge(conn, "deadline_change", None, title, "\n".join(lines))
+        finally:
+            conn.close()
     return result
+
+
+@api.post("/brief")
+def morning_brief():
+    """Send the morning brief. cron-job.org calls this daily at 7:30 AM."""
+    conn = connect()
+    try:
+        title, message = build_brief(conn)
+        sent = notify.nudge(conn, "brief", None, title, message)
+    finally:
+        conn.close()
+    return {"sent": sent, "title": title, "message": message}
 
 
 @api.post("/captures", status_code=201)
@@ -213,31 +241,16 @@ def one_list():
             """SELECT id, type, title, course, due_at, all_day, place
                FROM items WHERE status = 'open'"""
         ).fetchall()
-        # Every sync stamps the assignments it saw with the same last_seen_at, so rows
-        # missing from the latest sync are ones a professor deleted from Carmen
         assignments = conn.execute(
-            """SELECT id, title, course_code, due_at, all_day, url
-               FROM assignments
-               WHERE done_at IS NULL AND due_at >= ?
-                 AND last_seen_at = (SELECT MAX(last_seen_at) FROM assignments)""",
+            f"""SELECT id, title, course_code, due_at, all_day, url
+                FROM assignments
+                WHERE {LIVE_ASSIGNMENT} AND due_at >= ?""",
             (since,),
         ).fetchall()
     finally:
         conn.close()
 
-    entries = [
-        {"kind": "item", "id": row["id"], "type": row["type"], "title": row["title"],
-         "course": row["course"], "due_at": row["due_at"], "all_day": bool(row["all_day"]),
-         "place": row["place"], "url": None}
-        for row in items
-    ] + [
-        {"kind": "assignment", "id": row["id"], "type": "assignment", "title": row["title"],
-         "course": row["course_code"], "due_at": row["due_at"], "all_day": bool(row["all_day"]),
-         "place": None, "url": row["url"]}
-        for row in assignments
-    ]
-    entries.sort(key=lambda e: (e["due_at"] is None, e["due_at"] or ""))
-    return entries
+    return by_due([item_entry(row) for row in items] + [assignment_entry(row) for row in assignments])
 
 
 app.include_router(api)
