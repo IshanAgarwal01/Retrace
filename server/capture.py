@@ -1,5 +1,6 @@
 import os
-from datetime import date, datetime, time
+import re
+from datetime import date, datetime, time, timedelta
 from functools import cache
 from typing import Literal
 
@@ -76,16 +77,23 @@ def get_client() -> genai.Client:
     return genai.Client()  # reads GEMINI_API_KEY from the environment
 
 
+def local_due(due_date: str, due_time: str | None) -> tuple[str, bool]:
+    """Columbus-time "YYYY-MM-DD" (+ optional "HH:MM") -> (UTC ISO text, all_day).
+
+    Raises ValueError for anything that isn't a real date or time.
+    """
+    day = date.fromisoformat(due_date)
+    if due_time:
+        return normalize_due(datetime.combine(day, time.fromisoformat(due_time), tzinfo=COLUMBUS))
+    return normalize_due(day)
+
+
 def to_due(item: ParsedItem) -> tuple[str | None, bool]:
     """Turn the model's local date/time strings into (UTC ISO text, all_day)."""
     if not item.due_date:
         return None, False
     try:
-        day = date.fromisoformat(item.due_date)
-        if item.due_time:
-            when = datetime.combine(day, time.fromisoformat(item.due_time), tzinfo=COLUMBUS)
-            return normalize_due(when)
-        return normalize_due(day)
+        return local_due(item.due_date, item.due_time)
     except ValueError:
         return None, False
 
@@ -124,6 +132,75 @@ def parse_capture(text: str, course_codes: list[str]) -> tuple[list[dict], str]:
     if not items:
         raise CaptureError("Gemini returned an empty list")
     return items, capture.model_dump_json()
+
+
+# Things that need a deadline. When one comes back without a date, the app asks for one.
+DATED_TYPES = {"task", "reminder"}
+
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+SLASH_DATE = re.compile(r"^(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?$")
+
+DUE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "due_date": {**NULLABLE_STRING, "description": "YYYY-MM-DD, Columbus time"},
+        "due_time": {**NULLABLE_STRING, "description": "HH:MM, 24-hour"},
+    },
+    "required": ["due_date", "due_time"],
+}
+
+DUE_SYSTEM = """The student was asked when something is due and typed the answer below. Return the date (and time of day, if they gave one) it describes, resolving relative words against the current date given. A named weekday means its next occurrence after today. If the text doesn't describe a date, return null for both."""
+
+
+class ParsedDue(BaseModel):
+    due_date: str | None
+    due_time: str | None
+
+
+def quick_due(text: str, today: date) -> date | None:
+    """Understand the common answers without calling the AI: today, tomorrow, a weekday, 10/24."""
+    words = text.strip().lower().removeprefix("on ").removeprefix("this ").strip(" .!")
+    if words in ("today", "tonight"):
+        return today
+    if words in ("tomorrow", "tmrw", "tmr"):
+        return today + timedelta(days=1)
+    if words in WEEKDAYS:
+        # Next occurrence after today, matching what the capture prompt tells Gemini
+        days_ahead = (WEEKDAYS.index(words) - today.weekday()) % 7 or 7
+        return today + timedelta(days=days_ahead)
+    match = SLASH_DATE.match(words)
+    if match:
+        month, day, year = int(match[1]), int(match[2]), match[3]
+        if year:
+            year = int(year) + (2000 if len(year) == 2 else 0)
+            return date(year, month, day)
+        guess = date(today.year, month, day)
+        # "1/15" typed in October means next January
+        return guess if guess >= today else date(today.year + 1, month, day)
+    return None
+
+
+def parse_due_text(text: str) -> tuple[str, bool]:
+    """Turn an answer like "friday" or "next tuesday at 3pm" into (UTC ISO text, all_day).
+
+    Raises ValueError or CaptureError when no date can be found in it.
+    """
+    now = datetime.now(COLUMBUS)
+    day = quick_due(text, now.date())
+    if day:
+        return normalize_due(day)
+
+    interaction = get_client().interactions.create(
+        model=MODEL,
+        system_instruction=DUE_SYSTEM,
+        input=f"Current date and time: {now:%A, %B %d, %Y, %I:%M %p} (Columbus, Ohio)\n\nAnswer:\n{text}",
+        response_format={"type": "text", "mime_type": "application/json", "schema": DUE_SCHEMA},
+        generation_config={"thinking_level": "low"},
+    )
+    parsed = ParsedDue.model_validate_json(interaction.output_text or "")
+    if not parsed.due_date:
+        raise CaptureError("No date in that answer")
+    return local_due(parsed.due_date, parsed.due_time)
 
 
 TYPE_LABELS = {"task": "Task", "reminder": "Reminder", "idea": "Idea", "song": "Song",

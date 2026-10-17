@@ -33,6 +33,7 @@ export type CaptureResult = {
   summary: string; // one readable line per item, written by the server
   loop: string | null; // "You've thought about this 3 times", when it keeps coming up
   items: CapturedItem[];
+  needs_date: number[]; // ids of tasks and reminders that came back without a due date
 };
 
 export type SyncResult = {
@@ -145,7 +146,12 @@ async function request<T>(
     throw new ApiError("The server rejected the API key");
   }
   if (!response.ok) {
-    throw new ApiError(`Server error ${response.status}`);
+    // Our server explains what was wrong in a "detail" field; show that when there is one
+    const detail = await response
+      .json()
+      .then((body: { detail?: unknown }) => (typeof body.detail === "string" ? body.detail : null))
+      .catch(() => null);
+    throw new ApiError(detail ?? `Server error ${response.status}`);
   }
   return (await response.json()) as T;
 }
@@ -156,6 +162,8 @@ export const api = {
     request<CaptureResult>(s, "/captures", "POST", { text, source: "text" }),
   completeItem: (s: Settings, id: number) =>
     request(s, `/items/${id}`, "PATCH", { status: "done" }),
+  setDue: (s: Settings, id: number, due: { date: string; time?: string } | { text: string }) =>
+    request<{ summary: string }>(s, `/items/${id}/due`, "POST", due),
   completeAssignment: (s: Settings, id: number) =>
     request(s, `/assignments/${id}`, "PATCH", { done: true }),
   syncCarmen: (s: Settings) => request<SyncResult>(s, "/sync", "POST"),

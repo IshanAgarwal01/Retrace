@@ -1,8 +1,10 @@
+import { Ionicons } from "@expo/vector-icons";
 import { useState } from "react";
-import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { api, errorMessage, saveSettings, type Settings } from "./api";
 import type { Theme } from "./theme";
+import { Card, PrimaryButton } from "./ui";
 
 type Props = {
   theme: Theme;
@@ -34,79 +36,122 @@ export function SettingsScreen({ theme, initial, onSaved, onCancel }: Props) {
     }
   }
 
-  const inputStyle = [styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.surface }];
+  const inputStyle = [
+    styles.input,
+    { color: theme.text, borderColor: theme.border, backgroundColor: theme.surfaceMuted },
+  ];
 
   return (
-    <View style={styles.container}>
-      <Text style={[styles.heading, { color: theme.text }]}>Connect to your server</Text>
-      <Text style={[styles.help, { color: theme.muted }]}>
-        The server address is where Retrace runs; it's usually filled in for you. The API key is
-        RETRACE_API_KEY from your server settings.
-      </Text>
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+      <View style={styles.brand}>
+        <View style={[styles.logo, { backgroundColor: theme.accent }]}>
+          <Ionicons name="sparkles" size={24} color={theme.accentText} />
+        </View>
+        <Text style={[styles.appName, { color: theme.text }]}>Retrace</Text>
+        <Text style={[styles.tagline, { color: theme.muted }]}>Catch every thought. Get back the ones you lose.</Text>
+      </View>
 
-      <Text style={[styles.label, { color: theme.muted }]}>Server address</Text>
-      <TextInput
-        value={serverUrl}
-        onChangeText={setServerUrl}
-        placeholder="http://192.168.1.20:8000"
-        placeholderTextColor={theme.muted}
-        autoCapitalize="none"
-        autoCorrect={false}
-        keyboardType="url"
-        style={inputStyle}
-      />
+      <Card theme={theme} style={styles.card}>
+        <Text style={[styles.heading, { color: theme.text }]}>Connect to your server</Text>
+        <Text style={[styles.help, { color: theme.muted }]}>
+          The address is usually filled in for you. The API key is RETRACE_API_KEY from your server settings
+          (line 2 of server/.env).
+        </Text>
 
-      <Text style={[styles.label, { color: theme.muted }]}>API key</Text>
-      <TextInput
-        value={apiKey}
-        onChangeText={setApiKey}
-        placeholder="RETRACE_API_KEY"
-        placeholderTextColor={theme.muted}
-        autoCapitalize="none"
-        autoCorrect={false}
-        secureTextEntry
-        style={inputStyle}
-      />
+        <Text style={[styles.label, { color: theme.muted }]}>Server address</Text>
+        <TextInput
+          value={serverUrl}
+          onChangeText={setServerUrl}
+          placeholder="https://retrace-xxxx.onrender.com"
+          placeholderTextColor={theme.faint}
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="url"
+          style={inputStyle}
+        />
 
-      {error && <Text style={[styles.error, { color: theme.danger }]}>{error}</Text>}
+        <Text style={[styles.label, { color: theme.muted }]}>API key</Text>
+        <TextInput
+          value={apiKey}
+          onChangeText={setApiKey}
+          placeholder="RETRACE_API_KEY"
+          placeholderTextColor={theme.faint}
+          autoCapitalize="none"
+          autoCorrect={false}
+          secureTextEntry
+          onSubmitEditing={testAndSave}
+          style={inputStyle}
+        />
 
-      <Pressable
-        accessibilityRole="button"
-        onPress={testAndSave}
-        disabled={testing || !serverUrl.trim() || !apiKey.trim()}
-        style={[styles.button, { backgroundColor: theme.accent }]}
-      >
-        {testing ? (
-          <ActivityIndicator color={theme.accentText} />
-        ) : (
-          <Text style={[styles.buttonText, { color: theme.accentText }]}>Test and save</Text>
+        {error && (
+          <View style={[styles.errorBox, { backgroundColor: theme.dangerSoft }]}>
+            <Ionicons name="alert-circle-outline" size={18} color={theme.danger} />
+            <Text style={[styles.errorText, { color: theme.danger }]}>{error}</Text>
+          </View>
         )}
-      </Pressable>
 
-      {onCancel && (
-        <Pressable accessibilityRole="button" onPress={onCancel} style={styles.cancel}>
-          <Text style={{ color: theme.muted, fontSize: 15 }}>Cancel</Text>
-        </Pressable>
-      )}
-    </View>
+        <View style={styles.buttons}>
+          <PrimaryButton
+            theme={theme}
+            label="Test and save"
+            onPress={testAndSave}
+            busy={testing}
+            disabled={!serverUrl.trim() || !apiKey.trim()}
+          />
+          {onCancel && (
+            <Pressable accessibilityRole="button" onPress={onCancel} style={styles.cancel}>
+              <Text style={{ color: theme.muted, fontSize: 15 }}>Cancel</Text>
+            </Pressable>
+          )}
+        </View>
+      </Card>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    flexGrow: 1,
+    justifyContent: "center",
     padding: 20,
+    width: "100%",
+    maxWidth: 480,
+    alignSelf: "center",
+    gap: 24,
+  },
+  brand: {
+    alignItems: "center",
     gap: 8,
   },
+  logo: {
+    width: 56,
+    height: 56,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 4,
+  },
+  appName: {
+    fontSize: 28,
+    fontWeight: "800",
+    letterSpacing: -0.6,
+  },
+  tagline: {
+    fontSize: 15,
+    textAlign: "center",
+  },
+  card: {
+    gap: 8,
+    padding: 22,
+  },
   heading: {
-    fontSize: 24,
+    fontSize: 18,
     fontWeight: "700",
-    marginTop: 12,
   },
   help: {
     fontSize: 14,
     lineHeight: 20,
-    marginBottom: 12,
+    marginBottom: 6,
   },
   label: {
     fontSize: 13,
@@ -115,25 +160,26 @@ const styles = StyleSheet.create({
   },
   input: {
     borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 12,
+    borderRadius: 12,
+    paddingHorizontal: 14,
     paddingVertical: 12,
     fontSize: 16,
   },
-  error: {
-    fontSize: 14,
+  errorBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    padding: 12,
+    borderRadius: 12,
     marginTop: 8,
   },
-  button: {
-    marginTop: 16,
-    height: 48,
-    borderRadius: 24,
-    alignItems: "center",
-    justifyContent: "center",
+  errorText: {
+    flex: 1,
+    fontSize: 14,
   },
-  buttonText: {
-    fontSize: 16,
-    fontWeight: "600",
+  buttons: {
+    marginTop: 14,
+    gap: 4,
   },
   cancel: {
     alignItems: "center",

@@ -16,7 +16,7 @@ import ghosts
 import loops
 import notify
 from brief import build_brief
-from capture import parse_capture, summarize
+from capture import DATED_TYPES, CaptureError, local_due, parse_capture, parse_due_text, summarize
 from db import connect, init_db
 import retrace
 from queries import (LIVE_ASSIGNMENT, assignment_entry, by_due, due_between, item_entry,
@@ -85,6 +85,13 @@ class ItemUpdate(BaseModel):
 
 class AssignmentUpdate(BaseModel):
     done: bool
+
+
+class DueIn(BaseModel):
+    # Either a picked date (Columbus time) or words to read, like "friday at 3pm"
+    date: str | None = Field(default=None, max_length=10)  # "YYYY-MM-DD"
+    time: str | None = Field(default=None, max_length=5)   # "HH:MM", 24-hour
+    text: str | None = Field(default=None, max_length=200)
 
 
 # How far back unfinished Carmen assignments still show up in the list
@@ -236,7 +243,11 @@ def save_capture(text: str, source: str) -> dict:
     finally:
         conn.close()
     summary = summarize(parsed) + (f"\n{loop_note}" if loop_note else "")
-    return {"ai_ok": ai_output is not None, "summary": summary, "loop": loop_note, "items": saved}
+    # Tasks and reminders with no deadline: the app follows up and asks when they're due
+    needs_date = [item["id"] for item in saved
+                  if ai_output is not None and item["type"] in DATED_TYPES and not item["due_at"]]
+    return {"ai_ok": ai_output is not None, "summary": summary, "loop": loop_note,
+            "items": saved, "needs_date": needs_date}
 
 
 @api.post("/captures", status_code=201)
@@ -412,6 +423,41 @@ def update_item(item_id: int, update: ItemUpdate):
     finally:
         conn.close()
     return dict(row)
+
+
+@api.post("/items/{item_id}/due")
+def set_item_due(item_id: int, due: DueIn):
+    """Give an item a deadline, from a picked date or from typed words like "friday 3pm"."""
+    try:
+        if due.date:
+            due_at, all_day = local_due(due.date, due.time)
+        elif due.text and due.text.strip():
+            due_at, all_day = parse_due_text(due.text)
+        else:
+            raise HTTPException(status_code=422, detail="Send a date or some text")
+    except (ValueError, CaptureError):
+        raise HTTPException(status_code=422,
+                            detail="Couldn't find a date in that. Try something like Friday, 10/24, or tomorrow 5pm.")
+    except HTTPException:
+        raise
+    except Exception:
+        log.exception("Reading a due date failed")
+        raise HTTPException(status_code=422,
+                            detail="Couldn't read that right now. Try a simple day like Friday or 10/24.")
+
+    conn = connect()
+    try:
+        with conn.transaction():
+            cursor = conn.execute(
+                "UPDATE items SET due_at = ?, all_day = ? WHERE id = ?",
+                (due_at, int(all_day), item_id),
+            )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Item not found")
+        row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    finally:
+        conn.close()
+    return {"item": row, "summary": summarize([row])}
 
 
 @api.patch("/assignments/{assignment_id}")
