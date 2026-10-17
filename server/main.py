@@ -15,6 +15,7 @@ import notify
 from brief import build_brief
 from capture import parse_capture, summarize
 from db import connect, init_db
+import retrace
 from queries import (LIVE_ASSIGNMENT, assignment_entry, by_due, due_between, item_entry,
                      latest_context, recent_captures)
 from sync import sync_assignments
@@ -61,6 +62,13 @@ class CaptureIn(BaseModel):
 class ContextIn(BaseModel):
     place: str = Field(min_length=1, max_length=120)
     source: str = Field(default="shortcut", max_length=40)
+
+
+class RetraceEnd(BaseModel):
+    outcome: Literal["recovered", "ghost", "gave_up"]
+    text: str | None = Field(default=None, max_length=5000)  # the thought, when recovered
+    item_id: int | None = None  # or: it was an item already on your list, so nothing new to save
+    cue: str | None = Field(default=None, max_length=200)    # e.g. "item:12" or "chip:buy"
 
 
 class ItemUpdate(BaseModel):
@@ -248,6 +256,82 @@ def get_context_now():
         return context_now(conn)
     finally:
         conn.close()
+
+
+@api.post("/retrace", status_code=201)
+def start_retrace():
+    """Start a lost-thought session: what you were up to, plus ranked guesses."""
+    now = datetime.now(timezone.utc)
+    conn = connect()
+    try:
+        strip = context_now(conn)
+        here = latest_context(conn, since=(now - CONTEXT_FRESHNESS).isoformat())
+        guesses = retrace.rank_guesses(conn, now, here["place"] if here else None)
+
+        phrased_by_ai = False
+        top = guesses[:retrace.PHRASED_BY_AI]
+        if top:
+            try:
+                questions = retrace.phrase_questions(top)
+                for guess in top:
+                    guess["question"] = questions.get(guess["ref"], guess["question"])
+                phrased_by_ai = bool(questions)
+            except Exception:
+                # The template questions are already filled in, so just carry on
+                log.warning("Gemini couldn't word the Retrace questions; using templates",
+                            exc_info=True)
+
+        with conn.transaction():
+            session_id = conn.execute(
+                """INSERT INTO retrace_sessions (started_at, context_id, cues_shown)
+                   VALUES (?, ?, ?) RETURNING id""",
+                (now.isoformat(), here["id"] if here else None, retrace.cues_json(guesses)),
+            ).fetchone()["id"]
+    finally:
+        conn.close()
+    return {"id": session_id, "started_at": now.isoformat(), "context": strip,
+            "chips": retrace.CHIPS, "guesses": guesses, "phrased_by_ai": phrased_by_ai}
+
+
+@api.patch("/retrace/{session_id}")
+def end_retrace(session_id: int, end: RetraceEnd):
+    """Finish a session. "recovered" saves the thought like any other capture."""
+    if end.outcome == "recovered" and not end.item_id and not (end.text and end.text.strip()):
+        raise HTTPException(status_code=422, detail="A recovered thought needs its text")
+
+    conn = connect()
+    try:
+        session = conn.execute(
+            "SELECT * FROM retrace_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if session is None:
+            raise HTTPException(status_code=404, detail="Retrace session not found")
+        if session["outcome"]:
+            raise HTTPException(status_code=409, detail="This session already ended")
+
+        captured = None
+        recovered_item_id = None
+        if end.outcome == "recovered" and end.item_id:
+            if not conn.execute("SELECT id FROM items WHERE id = ?", (end.item_id,)).fetchone():
+                raise HTTPException(status_code=404, detail="Item not found")
+            recovered_item_id = end.item_id
+        elif end.outcome == "recovered":
+            captured = save_capture(end.text.strip(), "recovered")
+            recovered_item_id = captured["items"][0]["id"]
+        now = datetime.now(timezone.utc)
+        seconds = int((now - datetime.fromisoformat(session["started_at"])).total_seconds())
+
+        with conn.transaction():
+            conn.execute(
+                """UPDATE retrace_sessions
+                   SET outcome = ?, cue_that_worked = ?, recovered_item_id = ?, seconds_taken = ?
+                   WHERE id = ?""",
+                (end.outcome, end.cue, recovered_item_id, seconds, session_id),
+            )
+    finally:
+        conn.close()
+    return {"id": session_id, "outcome": end.outcome, "seconds_taken": seconds,
+            "recovered_item_id": recovered_item_id, "capture": captured}
 
 
 @api.get("/items")

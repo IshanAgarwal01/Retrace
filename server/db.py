@@ -68,6 +68,18 @@ CREATE TABLE IF NOT EXISTS contexts (
     at     TEXT NOT NULL,
     place  TEXT NOT NULL,
     source TEXT NOT NULL
+);
+
+-- One row per time you tapped "I lost a thought"
+CREATE TABLE IF NOT EXISTS retrace_sessions (
+    id                {id},
+    started_at        TEXT NOT NULL,
+    context_id        INTEGER,
+    cues_shown        TEXT NOT NULL,
+    cue_that_worked   TEXT,
+    outcome           TEXT,
+    recovered_item_id INTEGER,
+    seconds_taken     INTEGER
 )
 """
 

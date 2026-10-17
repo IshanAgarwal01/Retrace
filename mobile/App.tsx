@@ -16,6 +16,7 @@ import { api, errorMessage, loadSettings, type CaptureResult, type Entry, type S
 import { CaptureBar } from "./src/CaptureBar";
 import { EntryRow } from "./src/EntryRow";
 import { formatDue, groupEntries, typeLabel } from "./src/grouping";
+import { RetraceScreen } from "./src/RetraceScreen";
 import { SettingsScreen } from "./src/SettingsScreen";
 import { useTheme } from "./src/theme";
 
@@ -42,6 +43,7 @@ function Main() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [editingSettings, setEditingSettings] = useState(false);
+  const [retracing, setRetracing] = useState(false);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -150,6 +152,23 @@ function Main() {
     );
   }
 
+  if (retracing) {
+    return (
+      <SafeAreaView style={[styles.screen, { backgroundColor: theme.background }]}>
+        <StatusBar style="auto" />
+        <RetraceScreen
+          theme={theme}
+          settings={settings}
+          onDone={(message) => {
+            setRetracing(false);
+            if (message) setBanner(message);
+            refresh();
+          }}
+        />
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={[styles.screen, { backgroundColor: theme.background }]} edges={["top", "left", "right"]}>
       <StatusBar style="auto" />
@@ -165,6 +184,13 @@ function Main() {
             </Pressable>
           </View>
         </View>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setRetracing(true)}
+          style={[styles.lostButton, { borderColor: theme.accent }]}
+        >
+          <Text style={[styles.lostButtonText, { color: theme.accent }]}>I lost a thought</Text>
+        </Pressable>
 
         {error && (
           <Pressable onPress={() => setError(null)} style={styles.errorBox}>
@@ -247,6 +273,19 @@ const styles = StyleSheet.create({
   headerButton: {
     fontSize: 16,
     fontWeight: "500",
+  },
+  lostButton: {
+    marginHorizontal: 16,
+    marginBottom: 4,
+    height: 40,
+    borderWidth: 1.5,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  lostButtonText: {
+    fontSize: 15,
+    fontWeight: "600",
   },
   errorBox: {
     marginHorizontal: 16,

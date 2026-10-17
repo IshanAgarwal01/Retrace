@@ -17,6 +17,9 @@ import pytest  # noqa: E402
 
 import db  # noqa: E402
 
+# Every table, for wiping a Postgres test database between tests
+TABLES = ["assignment_changes", "assignments", "items", "nudges", "contexts", "retrace_sessions"]
+
 
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
@@ -24,7 +27,7 @@ def temp_db(tmp_path, monkeypatch):
     if os.environ["DATABASE_URL"]:
         conn = db.connect()
         with conn.transaction():
-            conn.execute("DROP TABLE IF EXISTS assignment_changes, assignments, items, nudges, contexts")
+            conn.execute(f"DROP TABLE IF EXISTS {', '.join(TABLES)}")
         conn.close()
     db.init_db()
 
