@@ -24,7 +24,7 @@ def temp_db(tmp_path, monkeypatch):
     if os.environ["DATABASE_URL"]:
         conn = db.connect()
         with conn.transaction():
-            conn.execute("DROP TABLE IF EXISTS assignment_changes, assignments, items, nudges")
+            conn.execute("DROP TABLE IF EXISTS assignment_changes, assignments, items, nudges, contexts")
         conn.close()
     db.init_db()
 

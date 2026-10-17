@@ -38,3 +38,23 @@ def due_between(conn, start: str, end: str) -> list[dict]:
     ).fetchall()
     return by_due([item_entry(r) for r in items] + [assignment_entry(r) for r in assignments])
 
+
+
+def recent_captures(conn, limit: int) -> list[dict]:
+    """The newest captures, whatever their status (archived ones aside)."""
+    rows = conn.execute(
+        """SELECT id, type, title, status, created_at FROM items
+           WHERE status <> 'archived'
+           ORDER BY created_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def latest_context(conn, since: str | None = None) -> dict | None:
+    """The most recent place the phone reported, optionally only if newer than `since`."""
+    if since:
+        return conn.execute(
+            "SELECT * FROM contexts WHERE at >= ? ORDER BY at DESC, id DESC LIMIT 1", (since,)
+        ).fetchone()
+    return conn.execute("SELECT * FROM contexts ORDER BY at DESC, id DESC LIMIT 1").fetchone()

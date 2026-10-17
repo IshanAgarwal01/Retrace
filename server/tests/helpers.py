@@ -29,10 +29,11 @@ def add_item(title, due_at=None, created_at="2026-10-01T00:00:00+00:00", type="t
     conn = main.connect()
     with conn.transaction():
         row = conn.execute(
-            """INSERT INTO items (type, title, source, status, due_at, place, raw_text, created_at)
-               VALUES (?, ?, 'text', ?, ?, ?, ?, ?)
+            """INSERT INTO items
+               (type, title, source, status, due_at, place, raw_text, created_at, context_id)
+               VALUES (?, ?, 'text', ?, ?, ?, ?, ?, ?)
                RETURNING id""",
-            (type, title, status, due_at, place, title, created_at),
+            (type, title, status, due_at, place, title, created_at, context_id),
         ).fetchone()
     conn.close()
     return row["id"]

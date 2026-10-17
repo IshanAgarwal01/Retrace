@@ -15,7 +15,8 @@ import notify
 from brief import build_brief
 from capture import parse_capture, summarize
 from db import connect, init_db
-from queries import LIVE_ASSIGNMENT, assignment_entry, by_due, item_entry
+from queries import (LIVE_ASSIGNMENT, assignment_entry, by_due, due_between, item_entry,
+                     latest_context, recent_captures)
 from sync import sync_assignments
 
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +56,11 @@ api = APIRouter(dependencies=[Depends(require_api_key)])
 class CaptureIn(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
     source: Literal["text", "voice", "share"] = "text"
+
+
+class ContextIn(BaseModel):
+    place: str = Field(min_length=1, max_length=120)
+    source: str = Field(default="shortcut", max_length=40)
 
 
 class ItemUpdate(BaseModel):
@@ -108,6 +114,7 @@ def list_changes():
 @api.post("/sync")
 def sync():
     """Pull Carmen. cron-job.org calls this every hour."""
+    forget_old_contexts()  # first, so it still happens if Carmen is down
     result = sync_assignments()
     log.info("Carmen sync: %s added, %s changes", result["added"], len(result["changes"]))
 
@@ -125,6 +132,21 @@ def sync():
     return result
 
 
+def forget_old_contexts() -> None:
+    cutoff = (datetime.now(timezone.utc) - CONTEXT_KEEP).isoformat()
+    conn = connect()
+    try:
+        with conn.transaction():
+            conn.execute(
+                """DELETE FROM contexts
+                   WHERE at < ?
+                     AND id NOT IN (SELECT context_id FROM items WHERE context_id IS NOT NULL)""",
+                (cutoff,),
+            )
+    finally:
+        conn.close()
+
+
 @api.post("/brief")
 def morning_brief():
     """Send the morning brief. cron-job.org calls this daily at 7:30 AM."""
@@ -137,8 +159,14 @@ def morning_brief():
     return {"sent": sent, "title": title, "message": message}
 
 
-@api.post("/captures", status_code=201)
-def create_capture(capture: CaptureIn):
+# A capture remembers where you were if the phone reported a place this recently
+CONTEXT_FRESHNESS = timedelta(hours=2)
+# Places older than this are forgotten, unless a capture or lost thought points at them
+CONTEXT_KEEP = timedelta(days=30)
+
+
+def save_capture(text: str, source: str) -> dict:
+    """Sort raw text into items and save them. Shared by POST /captures and Retrace."""
     conn = connect()
     try:
         course_codes = [
@@ -149,33 +177,77 @@ def create_capture(capture: CaptureIn):
         ]
 
         try:
-            parsed, ai_output = parse_capture(capture.text, course_codes)
+            parsed, ai_output = parse_capture(text, course_codes)
         except Exception:
             # Never lose a thought: if the AI step fails for any reason, keep the raw
             # text as a note. The full error still goes to the server log.
             log.exception("AI parsing failed; saving capture as a plain note")
-            parsed = [{"type": "note", "title": capture.text[:120], "due_at": None,
+            parsed = [{"type": "note", "title": text[:120], "due_at": None,
                        "all_day": False, "course": None, "place": None}]
             ai_output = None
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        context = latest_context(conn, since=(now - CONTEXT_FRESHNESS).isoformat())
+        context_id = context["id"] if context else None
+
         saved = []
         with conn.transaction():
             for item in parsed:
                 cursor = conn.execute(
                     """INSERT INTO items
                        (type, title, source, due_at, all_day, course, place,
-                        raw_text, ai_output, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        raw_text, ai_output, created_at, context_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        RETURNING id""",
-                    (item["type"], item["title"], capture.source, item["due_at"],
+                    (item["type"], item["title"], source, item["due_at"],
                      int(item["all_day"]), item["course"], item["place"],
-                     capture.text, ai_output, now),
+                     text, ai_output, now.isoformat(), context_id),
                 )
                 saved.append({"id": cursor.fetchone()["id"], **item, "status": "open"})
     finally:
         conn.close()
     return {"ai_ok": ai_output is not None, "summary": summarize(parsed), "items": saved}
+
+
+@api.post("/captures", status_code=201)
+def create_capture(capture: CaptureIn):
+    return save_capture(capture.text, capture.source)
+
+
+@api.post("/contexts", status_code=201)
+def add_context(context: ContextIn):
+    """Record where you are. Called by iOS Shortcuts automations ("When I arrive at Dreese")."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = connect()
+    try:
+        with conn.transaction():
+            context_id = conn.execute(
+                "INSERT INTO contexts (at, place, source) VALUES (?, ?, ?) RETURNING id",
+                (now, context.place.strip(), context.source),
+            ).fetchone()["id"]
+    finally:
+        conn.close()
+    return {"id": context_id, "at": now, "place": context.place.strip()}
+
+
+def context_now(conn) -> dict:
+    """Where you last were, what's due in the next day, and what you captured lately."""
+    now = datetime.now(timezone.utc)
+    place = latest_context(conn)
+    return {
+        "place": {"place": place["place"], "at": place["at"]} if place else None,
+        "due_soon": due_between(conn, now.isoformat(), (now + timedelta(hours=24)).isoformat()),
+        "recent_captures": recent_captures(conn, 5),
+    }
+
+
+@api.get("/context/now")
+def get_context_now():
+    conn = connect()
+    try:
+        return context_now(conn)
+    finally:
+        conn.close()
 
 
 @api.get("/items")

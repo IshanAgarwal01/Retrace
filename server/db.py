@@ -60,6 +60,14 @@ CREATE TABLE IF NOT EXISTS nudges (
     item_ref TEXT,
     message  TEXT NOT NULL,
     sent_at  TEXT NOT NULL
+);
+
+-- Where the phone was, reported by iOS Shortcuts arrival automations
+CREATE TABLE IF NOT EXISTS contexts (
+    id     {id},
+    at     TEXT NOT NULL,
+    place  TEXT NOT NULL,
+    source TEXT NOT NULL
 )
 """
 
@@ -72,6 +80,7 @@ ID_COLUMN = {
 # tables that already exist, so older databases get these with ALTER TABLE instead.
 ADDED_COLUMNS = [
     ("assignments", "done_at", "TEXT"),
+    ("items", "context_id", "INTEGER"),  # where you were when you captured it
 ]
 
 
